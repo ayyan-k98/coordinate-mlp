@@ -41,11 +41,15 @@ class CoordinateDQNAgent:
         batch_size: int = 32,
         memory_capacity: int = 50000,
         target_update_tau: float = 0.01,
-        device: str = 'cuda' if torch.cuda.is_available() else 'cpu'
+        device: str = 'cuda' if torch.cuda.is_available() else 'cpu',
+        sensor_range: Optional[float] = None,
+        use_pomdp: bool = False,
+        use_local_attention: bool = False,
+        attention_window_radius: int = 7
     ):
         """
         Args:
-            input_channels: Number of grid channels
+            input_channels: Number of grid channels (5 for full obs, 6 for POMDP with visibility mask)
             num_actions: Number of discrete actions
             hidden_dim: Hidden dimension size
             num_freq_bands: Number of Fourier frequency bands
@@ -58,12 +62,24 @@ class CoordinateDQNAgent:
             memory_capacity: Replay buffer capacity
             target_update_tau: Soft update coefficient (Polyak averaging)
             device: Device to run on ('cuda' or 'cpu')
+            sensor_range: Sensor range for POMDP (None = full observability)
+            use_pomdp: Whether to use POMDP with visibility masking
+            use_local_attention: Whether to use local attention (faster for large grids)
+            attention_window_radius: Radius for local attention window
         """
         self.device = torch.device(device)
         self.num_actions = num_actions
         self.gamma = gamma
         self.batch_size = batch_size
         self.target_update_tau = target_update_tau
+        
+        # POMDP settings
+        self.sensor_range = sensor_range
+        self.use_pomdp = use_pomdp
+        
+        # Local attention settings
+        self.use_local_attention = use_local_attention
+        self.attention_window_radius = attention_window_radius
         
         # Epsilon-greedy parameters
         self.epsilon = epsilon_start
@@ -75,14 +91,18 @@ class CoordinateDQNAgent:
             input_channels=input_channels,
             num_freq_bands=num_freq_bands,
             hidden_dim=hidden_dim,
-            num_actions=num_actions
+            num_actions=num_actions,
+            use_local_attention=use_local_attention,
+            attention_window_radius=attention_window_radius
         ).to(self.device)
         
         self.target_net = CoordinateCoverageNetwork(
             input_channels=input_channels,
             num_freq_bands=num_freq_bands,
             hidden_dim=hidden_dim,
-            num_actions=num_actions
+            num_actions=num_actions,
+            use_local_attention=use_local_attention,
+            attention_window_radius=attention_window_radius
         ).to(self.device)
         
         # Copy policy network weights to target network
@@ -106,15 +126,17 @@ class CoordinateDQNAgent:
         self,
         state: np.ndarray,
         epsilon: Optional[float] = None,
-        valid_actions: Optional[np.ndarray] = None
+        valid_actions: Optional[np.ndarray] = None,
+        agent_pos: Optional[Tuple[int, int]] = None
     ) -> int:
         """
         Select action using epsilon-greedy policy.
         
         Args:
-            state: Current state [C, H, W]
+            state: Current state [C, H, W] (without visibility mask)
             epsilon: Exploration rate (use self.epsilon if None)
             valid_actions: Boolean mask of valid actions [num_actions]
+            agent_pos: Agent position (y, x) for POMDP visibility mask
         
         Returns:
             action: Integer in [0, num_actions-1]
@@ -122,32 +144,95 @@ class CoordinateDQNAgent:
         if epsilon is None:
             epsilon = self.epsilon
         
+        # Get valid action indices
+        if valid_actions is not None:
+            valid_indices = np.where(valid_actions)[0]
+            if len(valid_indices) == 0:
+                raise ValueError("No valid actions available!")
+        else:
+            valid_indices = np.arange(self.num_actions)
+        
         # Epsilon-greedy
         if random.random() < epsilon:
             # Random valid action
-            if valid_actions is not None:
-                valid_indices = np.where(valid_actions)[0]
-                if len(valid_indices) > 0:
-                    return np.random.choice(valid_indices)
-            return random.randint(0, self.num_actions - 1)
+            return np.random.choice(valid_indices)
         
         # Greedy action
         with torch.no_grad():
+            # Add visibility mask if POMDP
+            if self.use_pomdp and agent_pos is not None:
+                state_with_mask = self._add_visibility_mask(state, agent_pos)
+            else:
+                state_with_mask = state
+            
             # Convert state to tensor
-            state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
+            state_tensor = torch.FloatTensor(state_with_mask).unsqueeze(0).to(self.device)
             
             # Forward pass
-            q_values = self.policy_net(state_tensor).squeeze(0)  # [num_actions]
+            if self.use_local_attention:
+                if agent_pos is None:
+                    raise ValueError("agent_pos is required when use_local_attention=True")
+                q_values = self.policy_net(state_tensor, agent_pos=agent_pos).squeeze(0).cpu().numpy()
+            else:
+                q_values = self.policy_net(state_tensor).squeeze(0).cpu().numpy()  # [num_actions]
             
             # Mask invalid actions
-            if valid_actions is not None:
-                q_values = q_values.cpu().numpy()
-                q_values[~valid_actions] = -np.inf
-                action = np.argmax(q_values)
-            else:
-                action = q_values.argmax().item()
+            masked_q = np.full(self.num_actions, -np.inf)
+            masked_q[valid_indices] = q_values[valid_indices]
+            action = np.argmax(masked_q)
         
         return action
+    
+    def _add_visibility_mask(self, state: np.ndarray, agent_pos: Tuple[int, int]) -> np.ndarray:
+        """
+        Add visibility mask as additional channel for POMDP.
+        
+        Args:
+            state: [C, H, W] state without visibility mask
+            agent_pos: (y, x) agent position
+        
+        Returns:
+            state_with_mask: [C+1, H, W] state with visibility mask
+        """
+        C, H, W = state.shape
+        
+        # Create visibility mask
+        visibility = self._create_visibility_mask(H, W, agent_pos)
+        
+        # Concatenate: [C+1, H, W]
+        state_with_mask = np.concatenate([state, visibility[np.newaxis, :, :]], axis=0)
+        
+        return state_with_mask
+    
+    def _create_visibility_mask(self, H: int, W: int, agent_pos: Tuple[int, int]) -> np.ndarray:
+        """
+        Create binary visibility mask based on sensor range.
+        
+        Args:
+            H: Grid height
+            W: Grid width
+            agent_pos: (y, x) agent position
+        
+        Returns:
+            mask: [H, W] binary mask (1=visible, 0=not visible)
+        """
+        if self.sensor_range is None:
+            # Full observability
+            return np.ones((H, W), dtype=np.float32)
+        
+        y, x = agent_pos
+        
+        # Create coordinate grids
+        y_coords = np.arange(H)[:, np.newaxis]
+        x_coords = np.arange(W)[np.newaxis, :]
+        
+        # Compute distances from agent
+        distances = np.sqrt((y_coords - y)**2 + (x_coords - x)**2)
+        
+        # Binary mask based on sensor range
+        mask = (distances <= self.sensor_range).astype(np.float32)
+        
+        return mask
     
     def update(self) -> Optional[dict]:
         """

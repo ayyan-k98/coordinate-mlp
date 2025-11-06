@@ -11,7 +11,7 @@ from typing import Optional, Tuple
 
 from .positional_encoding import FourierPositionalEncoding, generate_normalized_coords
 from .cell_encoder import CellFeatureMLP
-from .attention import AttentionPooling
+from .attention import AttentionPooling, LocalAttentionPooling
 from .q_network import DuelingQNetwork
 
 
@@ -34,7 +34,9 @@ class CoordinateCoverageNetwork(nn.Module):
         hidden_dim: int = 256,        # Hidden layer size
         num_actions: int = 9,         # Action space size
         num_attention_heads: int = 4, # Number of attention heads
-        dropout: float = 0.1          # Dropout probability
+        dropout: float = 0.1,         # Dropout probability
+        use_local_attention: bool = False,  # Use local attention instead of global
+        attention_window_radius: int = 7    # Radius for local attention
     ):
         """
         Args:
@@ -44,6 +46,8 @@ class CoordinateCoverageNetwork(nn.Module):
             num_actions: Number of discrete actions
             num_attention_heads: Number of attention heads for pooling
             dropout: Dropout probability for regularization
+            use_local_attention: If True, use local attention (faster for large grids)
+            attention_window_radius: Radius for local attention window
         """
         super().__init__()
         
@@ -51,6 +55,8 @@ class CoordinateCoverageNetwork(nn.Module):
         self.num_freq_bands = num_freq_bands
         self.hidden_dim = hidden_dim
         self.num_actions = num_actions
+        self.use_local_attention = use_local_attention
+        self.attention_window_radius = attention_window_radius
         
         # Sub-modules
         self.positional_encoder = FourierPositionalEncoding(num_freq_bands=num_freq_bands)
@@ -62,11 +68,20 @@ class CoordinateCoverageNetwork(nn.Module):
             dropout=dropout
         )
         
-        self.attention_pool = AttentionPooling(
-            hidden_dim=hidden_dim,
-            num_heads=num_attention_heads,
-            dropout=dropout
-        )
+        # Choose attention type
+        if use_local_attention:
+            self.attention_pool = LocalAttentionPooling(
+                hidden_dim=hidden_dim,
+                num_heads=num_attention_heads,
+                window_radius=attention_window_radius,
+                dropout=dropout
+            )
+        else:
+            self.attention_pool = AttentionPooling(
+                hidden_dim=hidden_dim,
+                num_heads=num_attention_heads,
+                dropout=dropout
+            )
         
         self.q_head = DuelingQNetwork(
             hidden_dim=hidden_dim,
@@ -106,6 +121,7 @@ class CoordinateCoverageNetwork(nn.Module):
     def forward(
         self,
         grid: torch.Tensor,
+        agent_pos: Optional[Tuple[int, int]] = None,
         return_attention: bool = False
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
@@ -113,11 +129,12 @@ class CoordinateCoverageNetwork(nn.Module):
         
         Args:
             grid: [batch, channels, H, W] - Input grid
+            agent_pos: (y, x) agent position (required if use_local_attention=True)
             return_attention: If True, also return attention weights
         
         Returns:
             q_values: [batch, num_actions] - Q-values for each action
-            attention_weights: [batch, num_heads, 1, H*W] (optional)
+            attention_weights: [batch, num_heads, 1, H*W or num_local] (optional)
         """
         B, C, H, W = grid.shape
         device = grid.device
@@ -140,13 +157,34 @@ class CoordinateCoverageNetwork(nn.Module):
         cell_features = self.cell_encoder(combined)  # [B, H*W, hidden_dim]
         
         # STEP 5: Attention-based aggregation
-        if return_attention:
-            aggregated, attention_weights = self.attention_pool(
-                cell_features, return_attention_weights=True
-            )
+        if self.use_local_attention:
+            # Local attention requires agent position
+            if agent_pos is None:
+                raise ValueError("agent_pos is required when use_local_attention=True")
+            
+            if return_attention:
+                aggregated, attention_weights = self.attention_pool(
+                    cell_features,
+                    agent_pos=agent_pos,
+                    grid_shape=(H, W),
+                    return_attention_weights=True
+                )
+            else:
+                aggregated = self.attention_pool(
+                    cell_features,
+                    agent_pos=agent_pos,
+                    grid_shape=(H, W)
+                )
+                attention_weights = None
         else:
-            aggregated = self.attention_pool(cell_features)
-            attention_weights = None
+            # Global attention
+            if return_attention:
+                aggregated, attention_weights = self.attention_pool(
+                    cell_features, return_attention_weights=True
+                )
+            else:
+                aggregated = self.attention_pool(cell_features)
+                attention_weights = None
         
         # STEP 6: Q-values
         q_values = self.q_head(aggregated)  # [B, num_actions]
@@ -284,5 +322,107 @@ if __name__ == "__main__":
         print(f"  {H}×{W} grid: {q_values.shape} ✓")
         assert q_values.shape == (2, num_actions)
     
-    print("\n✓ All tests passed!")
+    print("\nPASS: All global attention tests passed!")
+    
+    # =================================================================
+    # LOCAL ATTENTION TESTS
+    # =================================================================
+    print("\n" + "="*70)
+    print("Testing Coordinate Network with Local Attention")
+    print("="*70)
+    
+    # Create model with local attention
+    local_model = CoordinateCoverageNetwork(
+        input_channels=input_channels,
+        num_freq_bands=num_freq_bands,
+        hidden_dim=hidden_dim,
+        num_actions=num_actions,
+        num_attention_heads=4,
+        use_local_attention=True,
+        attention_window_radius=7
+    )
+    
+    print(f"\nLocal attention model created:")
+    print(f"  Window radius: {local_model.attention_window_radius}")
+    print(f"  Total parameters: {local_model.get_num_parameters():,}")
+    
+    # Test 1: Forward pass with local attention
+    H, W = 20, 20
+    grid = torch.randn(1, input_channels, H, W)
+    agent_pos = (10, 10)
+    q_values = local_model(grid, agent_pos=agent_pos)
+    print(f"\nTest 1 - Local attention forward:")
+    print(f"  Input: {grid.shape}")
+    print(f"  Agent position: {agent_pos}")
+    print(f"  Q-values: {q_values.shape}")
+    assert q_values.shape == (1, num_actions)
+    
+    # Test 2: Batch with same agent position
+    batch_size = 8
+    grid = torch.randn(batch_size, input_channels, H, W)
+    q_values = local_model(grid, agent_pos=agent_pos)
+    print(f"\nTest 2 - Batch with local attention:")
+    print(f"  Batch size: {batch_size}")
+    print(f"  Q-values: {q_values.shape}")
+    assert q_values.shape == (batch_size, num_actions)
+    
+    # Test 3: Different agent positions
+    positions = [(0, 0), (10, 10), (19, 19), (5, 15)]
+    print(f"\nTest 3 - Different agent positions:")
+    for pos in positions:
+        grid = torch.randn(2, input_channels, H, W)
+        q_values = local_model(grid, agent_pos=pos)
+        print(f"  Position {pos}: {q_values.shape}")
+        assert q_values.shape == (2, num_actions)
+    
+    # Test 4: Scale invariance with local attention
+    print(f"\nTest 4 - Scale invariance (local attention):")
+    agent_positions = {15: (7, 7), 20: (10, 10), 30: (15, 15), 40: (20, 20)}
+    for grid_size in [15, 20, 30, 40]:
+        grid = torch.randn(2, input_channels, grid_size, grid_size)
+        agent_pos = agent_positions[grid_size]
+        q_values = local_model(grid, agent_pos=agent_pos)
+        print(f"  {grid_size}x{grid_size} grid, agent at {agent_pos}: {q_values.shape}")
+        assert q_values.shape == (2, num_actions)
+    
+    # Test 5: Speed comparison
+    print(f"\nTest 5 - Speed comparison (global vs local attention):")
+    import time
+    
+    for grid_size in [20, 30, 40, 50]:
+        H, W = grid_size, grid_size
+        batch_size = 8
+        grid = torch.randn(batch_size, input_channels, H, W)
+        agent_pos = (grid_size // 2, grid_size // 2)
+        
+        # Global attention
+        model.eval()
+        with torch.no_grad():
+            start = time.time()
+            for _ in range(10):
+                _ = model(grid)
+            global_time = (time.time() - start) / 10
+        
+        # Local attention
+        local_model.eval()
+        with torch.no_grad():
+            start = time.time()
+            for _ in range(10):
+                _ = local_model(grid, agent_pos=agent_pos)
+            local_time = (time.time() - start) / 10
+        
+        speedup = global_time / local_time
+        print(f"  {grid_size}x{grid_size}: Global {global_time*1000:.2f}ms, "
+              f"Local {local_time*1000:.2f}ms, Speedup {speedup:.2f}x")
+    
+    # Test 6: Error handling - missing agent_pos
+    print(f"\nTest 6 - Error handling:")
+    try:
+        grid = torch.randn(1, input_channels, 20, 20)
+        _ = local_model(grid)  # Missing agent_pos
+        print("  FAIL: Should have raised ValueError")
+    except ValueError as e:
+        print(f"  PASS: Caught expected error: {str(e)[:50]}...")
+    
+    print("\nPASS: All local attention tests passed!")
     print("="*70)
