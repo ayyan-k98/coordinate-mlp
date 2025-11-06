@@ -1,0 +1,14 @@
+# Python dependencies for Coordinate MLP Coverage Agent
+
+# Core dependencies
+torch>=1.10.0
+numpy>=1.20.0
+matplotlib>=3.3.0
+
+# Optional dependencies
+tensorboard>=2.8.0  # For rich logging and visualization
+
+# Development dependencies (optional)
+pytest>=6.2.0  # For testing
+black>=21.0  # For code formatting
+flake8>=3.9.0  # For linting
