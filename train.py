@@ -36,14 +36,19 @@ def set_seed(seed: int):
         torch.backends.cudnn.deterministic = True
 
 
-def create_environment(grid_size: int, config: ExperimentConfig) -> CoverageEnvironment:
+def create_environment(
+    grid_size: int,
+    config: ExperimentConfig,
+    map_type: str = "random"  # NEW: Support curriculum map types
+) -> CoverageEnvironment:
     """
     Create coverage environment with appropriate parameters.
-    
+
     Args:
         grid_size: Size of the grid
         config: Experiment configuration
-    
+        map_type: Map type for curriculum learning
+
     Returns:
         Configured CoverageEnvironment instance
     """
@@ -59,10 +64,11 @@ def create_environment(grid_size: int, config: ExperimentConfig) -> CoverageEnvi
         sensor_range=sensor_range,
         obstacle_density=config.environment.obstacle_density,
         max_steps=max_steps,
-        seed=config.training.seed,
-        reward_config=reward_config
+        seed=None,  # Let curriculum handle seeding per episode
+        reward_config=reward_config,
+        map_type=map_type  # NEW: Pass map type for curriculum
     )
-    
+
     return env
 
 
@@ -199,7 +205,20 @@ def train(config: ExperimentConfig):
 
     # Initialize mixed precision trainer
     mp_trainer = MixedPrecisionTrainer(enabled=perf_config.use_amp, device=device)
-    
+
+    # Initialize curriculum scheduler
+    curriculum_config = create_default_curriculum()
+    curriculum = CurriculumScheduler(
+        curriculum_config,
+        grid_sizes=config.training.grid_sizes if config.training.multi_scale else [config.environment.base_grid_size]
+    )
+
+    print(f"\nCurriculum Learning: {'Enabled' if curriculum_config.enabled else 'Disabled'}")
+    if curriculum_config.enabled:
+        print(f"  Phases: {len(curriculum_config.phases)}")
+        print(f"  Total Episodes: {curriculum.total_curriculum_episodes}")
+        curriculum.print_status()
+
     # Create agent
     agent = CoordinateDQNAgent(
         input_channels=config.model.input_channels,
@@ -235,26 +254,40 @@ def train(config: ExperimentConfig):
     best_coverage = 0.0
     
     for episode in range(config.training.num_episodes):
-        # Select grid size (multi-scale curriculum)
-        if config.training.multi_scale:
-            grid_size = random.choice(config.training.grid_sizes)
-        else:
-            grid_size = config.environment.base_grid_size
-        
-        # Create environment
-        env = create_environment(grid_size, config)
+        # Sample from curriculum (grid size + map type)
+        grid_size = curriculum.sample_grid_size()
+        map_type = curriculum.sample_map_type()
+
+        # Create environment with curriculum map type
+        env = create_environment(grid_size, config, map_type=map_type)
         
         # Train episode
         metrics = train_episode(agent, env, config, episode)
         metrics['grid_size'] = grid_size
+        metrics['map_type'] = map_type
+
+        # Advance curriculum
+        phase_changed = curriculum.step()
+        if phase_changed:
+            print(f"\n{'='*70}")
+            print(f"  Curriculum Phase Transition!")
+            print(f"{'='*70}")
+            curriculum.print_status()
         
         # Update target network
         if episode % config.training.target_update_frequency == 0:
             agent.update_target_network()
         
-        # Log metrics
+        # Log metrics (more frequently to show curriculum progress)
         if episode % 10 == 0:
             logger.log_episode(episode, metrics)
+            # Log curriculum info
+            progress = curriculum.get_progress()
+            print(f"Episode {episode}: "
+                  f"Phase={progress['phase_name']}, "
+                  f"Map={map_type:10s}, "
+                  f"Grid={grid_size}x{grid_size}, "
+                  f"Coverage={metrics['coverage']*100:.1f}%")
         
         # Enhanced TensorBoard logging
         if tb_logger.enabled:
@@ -361,7 +394,10 @@ def main():
                        help='Random seed')
     parser.add_argument('--hidden-dim', type=int, default=256,
                        help='Hidden dimension size')
-    
+    parser.add_argument('--curriculum', type=str, default='default',
+                       choices=['default', 'fast', 'none'],
+                       help='Curriculum type: default (full), fast (shorter), none (disabled)')
+
     args = parser.parse_args()
     
     # Create configuration

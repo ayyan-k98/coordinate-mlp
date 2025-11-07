@@ -15,6 +15,13 @@ from dataclasses import dataclass
 from enum import IntEnum
 import copy
 
+# Import map generator for curriculum learning
+try:
+    from map_generator import MapGenerator
+    MAP_GENERATOR_AVAILABLE = True
+except ImportError:
+    MAP_GENERATOR_AVAILABLE = False
+
 
 class Action(IntEnum):
     """Discrete action space for grid movement."""
@@ -432,30 +439,39 @@ class CoverageEnvironment:
         obstacle_density: float = 0.15,
         max_steps: int = 500,
         seed: Optional[int] = None,
-        reward_config: Optional[Dict] = None
+        reward_config: Optional[Dict] = None,
+        map_type: str = "random"  # NEW: Support for curriculum learning
     ):
         """
         Args:
             grid_size: Size of square grid (height = width = grid_size)
             num_agents: Number of agents
             sensor_range: Sensor range for each agent
-            obstacle_density: Fraction of cells that are obstacles
+            obstacle_density: Fraction of cells that are obstacles (for random maps)
             max_steps: Maximum steps per episode
             seed: Random seed for reproducibility
             reward_config: Custom reward function parameters
+            map_type: Map type - "random", "empty", "corridor", "room", "cave", "lshape"
         """
         self.grid_size = grid_size
         self.num_agents = num_agents
         self.sensor_range = sensor_range
         self.obstacle_density = obstacle_density
         self.max_steps = max_steps
-        
+        self.map_type = map_type  # Store for curriculum learning
+
         # Random seed
         if seed is not None:
             np.random.seed(seed)
             self.rng = np.random.RandomState(seed)
         else:
             self.rng = np.random.RandomState()
+
+        # Map generator for curriculum learning
+        if MAP_GENERATOR_AVAILABLE:
+            self.map_generator = MapGenerator(grid_size)
+        else:
+            self.map_generator = None
         
         # Components
         self.sensor_model = ProbabilisticSensorModel(
@@ -481,40 +497,65 @@ class CoverageEnvironment:
             'revisits': 0
         }
     
-    def _generate_obstacles(self) -> np.ndarray:
+    def _generate_obstacles(self, map_type: Optional[str] = None) -> np.ndarray:
         """
-        Generate random obstacles.
-        
-        Uses Perlin-like noise for more realistic obstacle patterns
-        (clustered obstacles rather than random scatter).
-        
+        Generate obstacles using map_generator if available, else use simple clustering.
+
+        Args:
+            map_type: Type of map to generate ("random", "empty", "corridor", "room", "cave", "lshape")
+                     If None, uses self.map_type
+
         Returns:
             obstacles: [H, W] boolean array
         """
+        if map_type is None:
+            map_type = self.map_type
+
+        # Try to use MapGenerator for structured maps
+        if self.map_generator is not None and map_type != "random":
+            try:
+                _, obstacle_set = self.map_generator.generate(map_type)
+
+                # Convert set of (x, y) to boolean array [H, W]
+                obstacles = np.zeros((self.grid_size, self.grid_size), dtype=bool)
+                for (x, y) in obstacle_set:
+                    if 0 <= x < self.grid_size and 0 <= y < self.grid_size:
+                        obstacles[y, x] = True  # Note: y, x indexing
+
+                return obstacles
+            except Exception as e:
+                # Fall back to simple generation
+                print(f"Warning: MapGenerator failed ({e}), using simple generation")
+
+        # Simple clustered generation (original method)
         obstacles = np.zeros((self.grid_size, self.grid_size), dtype=bool)
-        
-        # Simple clustered generation
+
+        if map_type == "empty":
+            # No obstacles
+            return obstacles
+
+        # Simple clustered generation for "random" or fallback
         num_obstacles = int(self.grid_size ** 2 * self.obstacle_density)
         num_clusters = max(1, num_obstacles // 10)
-        
+
         for _ in range(num_clusters):
             # Random cluster center
             cy = self.rng.randint(0, self.grid_size)
             cx = self.rng.randint(0, self.grid_size)
-            
+
             # Random cluster size
             cluster_size = self.rng.randint(3, 8)
-            
+
             # Add obstacles in cluster
             for _ in range(cluster_size):
                 dy = self.rng.randint(-2, 3)
                 dx = self.rng.randint(-2, 3)
-                
+
                 ny, nx = cy + dy, cx + dx
-                
+
                 if 0 <= ny < self.grid_size and 0 <= nx < self.grid_size:
                     obstacles[ny, nx] = True
-        
+
         return obstacles
     
     def _initialize_agents(self, obstacles: np.ndarray) -> List[AgentState]:
@@ -567,15 +608,24 @@ class CoverageEnvironment:
         
         return agents
     
-    def reset(self) -> np.ndarray:
+    def reset(self, map_type: Optional[str] = None) -> np.ndarray:
         """
         Reset environment to initial state.
-        
+
+        Args:
+            map_type: Override map type for this episode (for curriculum learning)
+
         Returns:
             observation: [5, H, W] encoded state
         """
-        # Generate obstacles
-        obstacles = self._generate_obstacles()
+        # Allow curriculum to override map type
+        if map_type is not None:
+            current_map_type = map_type
+        else:
+            current_map_type = self.map_type
+
+        # Generate obstacles using specified map type
+        obstacles = self._generate_obstacles(current_map_type)
         
         # Initialize agents
         agents = self._initialize_agents(obstacles)
