@@ -16,6 +16,8 @@ class CurriculumPhase:
     map_types: List[str]  # Map types to sample from
     num_episodes: int     # Episodes in this phase
     description: str
+    epsilon_boost: Optional[float] = None  # Boost epsilon when entering this phase
+    epsilon_floor: Optional[float] = None  # Minimum epsilon during this phase
 
 
 @dataclass
@@ -29,31 +31,38 @@ class CurriculumConfig:
             name="Phase 1: Basics",
             map_types=["empty"],
             num_episodes=200,
-            description="Learn basic coverage on empty maps"
+            description="Learn basic coverage on empty maps",
+            epsilon_floor=0.1  # Low exploration needed for empty maps
         ),
         CurriculumPhase(
             name="Phase 2: Obstacles",
             map_types=["random"],
             num_episodes=300,
-            description="Learn obstacle avoidance with random obstacles"
+            description="Learn obstacle avoidance with random obstacles",
+            epsilon_floor=0.15  # Moderate exploration for obstacles
         ),
         CurriculumPhase(
             name="Phase 3: Structures",
             map_types=["corridor", "room"],
             num_episodes=400,
-            description="Learn navigation in structured environments"
+            description="Learn navigation in structured environments",
+            epsilon_boost=0.3,  # Boost exploration to find doors!
+            epsilon_floor=0.2   # Keep exploring to escape rooms
         ),
         CurriculumPhase(
             name="Phase 4: Complex",
             map_types=["cave", "lshape"],
             num_episodes=400,
-            description="Master complex irregular structures"
+            description="Master complex irregular structures",
+            epsilon_boost=0.35,  # High exploration for complex mazes
+            epsilon_floor=0.25   # Maintain exploration throughout
         ),
         CurriculumPhase(
             name="Phase 5: Mixed",
             map_types=["empty", "random", "corridor", "room", "cave", "lshape"],
             num_episodes=200,
-            description="Generalize across all map types"
+            description="Generalize across all map types",
+            epsilon_floor=0.1  # Final polish with lower exploration
         ),
     ])
 
@@ -143,6 +152,44 @@ class CurriculumScheduler:
                 return True  # Phase changed
 
         return False  # Same phase
+    
+    def get_epsilon_adjustment(self, current_epsilon: float) -> float:
+        """
+        Get epsilon value adjusted for current curriculum phase.
+        
+        This implements phase-specific exploration:
+        - Empty maps: Low epsilon (0.1) - exploitation focused
+        - Structured maps: High epsilon (0.2-0.3) - must explore to find doors
+        - Complex maps: Very high epsilon (0.25-0.35) - escape local optima
+        
+        Args:
+            current_epsilon: Agent's current epsilon value
+        
+        Returns:
+            Adjusted epsilon for current phase
+        """
+        phase = self.get_current_phase()
+        
+        # Apply epsilon floor (minimum exploration for this phase)
+        if phase.epsilon_floor is not None:
+            current_epsilon = max(current_epsilon, phase.epsilon_floor)
+        
+        return current_epsilon
+    
+    def should_boost_epsilon(self) -> Optional[float]:
+        """
+        Check if epsilon should be boosted at phase transition.
+        
+        Returns:
+            Epsilon boost value if phase just started, None otherwise
+        """
+        phase = self.get_current_phase()
+        
+        # Only boost at the very start of a phase
+        if self.episode_in_phase == 0 and phase.epsilon_boost is not None:
+            return phase.epsilon_boost
+        
+        return None
 
     def get_progress(self) -> dict:
         """Get curriculum progress information."""
@@ -189,11 +236,16 @@ def create_fast_curriculum() -> CurriculumConfig:
     return CurriculumConfig(
         enabled=True,
         phases=[
-            CurriculumPhase("Phase 1: Basics", ["empty"], 100, "Basic coverage"),
-            CurriculumPhase("Phase 2: Obstacles", ["random"], 150, "Obstacle avoidance"),
-            CurriculumPhase("Phase 3: Structures", ["corridor", "room"], 200, "Structured navigation"),
-            CurriculumPhase("Phase 4: Complex", ["cave", "lshape"], 200, "Complex structures"),
-            CurriculumPhase("Phase 5: Mixed", ["empty", "random", "corridor", "room", "cave", "lshape"], 100, "Generalization"),
+            CurriculumPhase("Phase 1: Basics", ["empty"], 100, "Basic coverage", 
+                          epsilon_floor=0.1),
+            CurriculumPhase("Phase 2: Obstacles", ["random"], 150, "Obstacle avoidance",
+                          epsilon_floor=0.15),
+            CurriculumPhase("Phase 3: Structures", ["corridor", "room"], 200, "Structured navigation",
+                          epsilon_boost=0.3, epsilon_floor=0.2),
+            CurriculumPhase("Phase 4: Complex", ["cave", "lshape"], 200, "Complex structures",
+                          epsilon_boost=0.35, epsilon_floor=0.25),
+            CurriculumPhase("Phase 5: Mixed", ["empty", "random", "corridor", "room", "cave", "lshape"], 100, "Generalization",
+                          epsilon_floor=0.1),
         ]
     )
 

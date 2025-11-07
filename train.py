@@ -73,6 +73,132 @@ def create_environment(
     return env
 
 
+def evaluate_agent(
+    agent: CoordinateDQNAgent,
+    config: ExperimentConfig,
+    num_eval_episodes: int = 10,
+    eval_grid_sizes: Optional[list] = None,
+    eval_map_types: Optional[list] = None
+) -> dict:
+    """
+    Evaluate agent performance without exploration.
+    
+    Args:
+        agent: DQN agent to evaluate
+        config: Experiment configuration
+        num_eval_episodes: Number of evaluation episodes per configuration
+        eval_grid_sizes: Grid sizes to evaluate (None = use training sizes)
+        eval_map_types: Map types to evaluate (None = use all types)
+    
+    Returns:
+        Dictionary with evaluation metrics
+    """
+    # Default evaluation configurations
+    if eval_grid_sizes is None:
+        eval_grid_sizes = config.training.grid_sizes if config.training.multi_scale else [config.environment.base_grid_size]
+    
+    if eval_map_types is None:
+        eval_map_types = ["empty", "random", "corridor", "room", "cave", "lshape"]
+    
+    # Store results
+    all_results = []
+    results_by_size = {size: [] for size in eval_grid_sizes}
+    results_by_type = {map_type: [] for map_type in eval_map_types}
+    
+    print(f"\n{'='*70}")
+    print(f"Running Evaluation: {len(eval_grid_sizes)} sizes × {len(eval_map_types)} types × {num_eval_episodes} episodes")
+    print(f"{'='*70}")
+    
+    # Evaluate on each configuration
+    for grid_size in eval_grid_sizes:
+        for map_type in eval_map_types:
+            episode_results = []
+            
+            for eval_ep in range(num_eval_episodes):
+                # Create evaluation environment
+                env = create_environment(grid_size, config, map_type=map_type)
+                
+                # Run episode with greedy policy (epsilon=0)
+                state = env.reset()
+                done = False
+                episode_reward = 0
+                episode_steps = 0
+                
+                while not done:
+                    # Greedy action selection (no exploration)
+                    action = agent.select_action(state, epsilon=0.0)
+                    next_state, reward, done, info = env.step(action)
+                    state = next_state
+                    episode_reward += reward
+                    episode_steps += 1
+                
+                # Store metrics
+                result = {
+                    'grid_size': grid_size,
+                    'map_type': map_type,
+                    'coverage': info['coverage_pct'],
+                    'reward': episode_reward,
+                    'steps': episode_steps,
+                    'efficiency': info['coverage_pct'] / episode_steps if episode_steps > 0 else 0,
+                    'collisions': info.get('collisions', 0)
+                }
+                
+                episode_results.append(result)
+                all_results.append(result)
+                results_by_size[grid_size].append(result)
+                results_by_type[map_type].append(result)
+            
+            # Print summary for this configuration
+            avg_coverage = np.mean([r['coverage'] for r in episode_results])
+            avg_steps = np.mean([r['steps'] for r in episode_results])
+            print(f"  {grid_size}×{grid_size} {map_type:10s}: Coverage={avg_coverage*100:5.1f}%, Steps={avg_steps:5.1f}")
+    
+    # Compute aggregate statistics
+    eval_metrics = {
+        'overall': {
+            'coverage_mean': np.mean([r['coverage'] for r in all_results]),
+            'coverage_std': np.std([r['coverage'] for r in all_results]),
+            'reward_mean': np.mean([r['reward'] for r in all_results]),
+            'steps_mean': np.mean([r['steps'] for r in all_results]),
+            'efficiency_mean': np.mean([r['efficiency'] for r in all_results]),
+            'collisions_mean': np.mean([r['collisions'] for r in all_results]),
+        }
+    }
+    
+    # Per grid size statistics
+    eval_metrics['by_size'] = {}
+    for size, results in results_by_size.items():
+        if results:
+            eval_metrics['by_size'][size] = {
+                'coverage_mean': np.mean([r['coverage'] for r in results]),
+                'coverage_std': np.std([r['coverage'] for r in results]),
+                'reward_mean': np.mean([r['reward'] for r in results]),
+                'steps_mean': np.mean([r['steps'] for r in results]),
+            }
+    
+    # Per map type statistics
+    eval_metrics['by_type'] = {}
+    for map_type, results in results_by_type.items():
+        if results:
+            eval_metrics['by_type'][map_type] = {
+                'coverage_mean': np.mean([r['coverage'] for r in results]),
+                'coverage_std': np.std([r['coverage'] for r in results]),
+                'reward_mean': np.mean([r['reward'] for r in results]),
+                'steps_mean': np.mean([r['steps'] for r in results]),
+            }
+    
+    # Print summary
+    print(f"\n{'='*70}")
+    print(f"Evaluation Summary:")
+    print(f"  Overall Coverage: {eval_metrics['overall']['coverage_mean']*100:.1f}% ± {eval_metrics['overall']['coverage_std']*100:.1f}%")
+    print(f"  Overall Reward:   {eval_metrics['overall']['reward_mean']:.1f}")
+    print(f"  Overall Steps:    {eval_metrics['overall']['steps_mean']:.1f}")
+    print(f"  Overall Efficiency: {eval_metrics['overall']['efficiency_mean']:.4f}")
+    print(f"{'='*70}\n")
+    
+    return eval_metrics
+
+
 def train_episode(
     agent: CoordinateDQNAgent,
     env,
@@ -270,6 +396,16 @@ def train(config: ExperimentConfig, curriculum_type: str = 'default'):
         # Create environment with curriculum map type
         env = create_environment(grid_size, config, map_type=map_type)
         
+        # Apply curriculum-based epsilon adjustment
+        # Check if we should boost epsilon (at phase start)
+        epsilon_boost = curriculum.should_boost_epsilon()
+        if epsilon_boost is not None:
+            agent.epsilon = epsilon_boost
+            print(f"\n🔍 Epsilon boosted to {epsilon_boost:.2f} for new phase!")
+        
+        # Apply epsilon floor for current phase
+        agent.epsilon = curriculum.get_epsilon_adjustment(agent.epsilon)
+        
         # Train episode
         metrics = train_episode(agent, env, config, episode)
         metrics['grid_size'] = grid_size
@@ -296,7 +432,8 @@ def train(config: ExperimentConfig, curriculum_type: str = 'default'):
                   f"Phase={progress['phase_name']}, "
                   f"Map={map_type:10s}, "
                   f"Grid={grid_size}x{grid_size}, "
-                  f"Coverage={metrics['coverage']*100:.1f}%")
+                  f"Coverage={metrics['coverage']*100:.1f}%, "
+                  f"Epsilon={agent.epsilon:.3f}")
         
         # Enhanced TensorBoard logging
         if tb_logger.enabled:
@@ -342,17 +479,30 @@ def train(config: ExperimentConfig, curriculum_type: str = 'default'):
             if 'grad_norm' in metrics:
                 tb_logger.log_scalar('train/grad_norm', metrics['grad_norm'], episode)
             
+            # Curriculum tracking
+            if curriculum_config.enabled:
+                progress = curriculum.get_progress()
+                tb_logger.log_scalar('curriculum/phase_idx', progress['phase_idx'], episode)
+                tb_logger.log_scalar('curriculum/phase_progress', progress['phase_progress'], episode)
+                tb_logger.log_scalar('curriculum/overall_progress', progress['overall_progress'], episode)
+                
+                # Track phase-specific epsilon
+                phase = curriculum.get_current_phase()
+                if phase.epsilon_floor is not None:
+                    tb_logger.log_scalar('curriculum/epsilon_floor', phase.epsilon_floor, episode)
+                
+                # Per-map-type performance tracking
+                tb_logger.log_scalar(f'map_type/{map_type}/coverage', metrics['coverage'], episode)
+                tb_logger.log_scalar(f'map_type/{map_type}/reward', metrics['reward'], episode)
+                tb_logger.log_scalar(f'map_type/{map_type}/efficiency', metrics.get('efficiency', 0), episode)
+            
             # Multi-scale tracking
             if config.training.multi_scale:
                 tb_logger.log_scalar(f'multiscale/coverage_{grid_size}x{grid_size}', 
                                     metrics['coverage'], episode)
         
-        # Save best model
-        if metrics['coverage'] > best_coverage:
-            best_coverage = metrics['coverage']
-            save_path = os.path.join(config.checkpoint_dir, 
-                                    f"{config.experiment_name}_best.pt")
-            agent.save(save_path)
+        # Note: best_coverage is now updated during validation (every eval_frequency episodes)
+        # This ensures we save models based on generalization, not training performance
         
         # Save checkpoint
         if episode % config.training.save_frequency == 0 and episode > 0:
@@ -361,13 +511,50 @@ def train(config: ExperimentConfig, curriculum_type: str = 'default'):
             agent.save(save_path)
             print(f"\n  Checkpoint saved: {save_path}")
         
-        # Evaluation
+        # Periodic Validation
         if episode % config.training.eval_frequency == 0 and episode > 0:
-            print(f"\n  Evaluation at episode {episode}:")
-            # Run quick evaluation (placeholder)
-            eval_coverage = metrics['coverage']
-            print(f"    Current coverage: {eval_coverage*100:.1f}%")
-            print(f"    Best coverage: {best_coverage*100:.1f}%")
+            print(f"\n{'='*70}")
+            print(f"VALIDATION at Episode {episode}")
+            print(f"{'='*70}")
+            
+            # Run proper evaluation with greedy policy
+            eval_metrics = evaluate_agent(
+                agent=agent,
+                config=config,
+                num_eval_episodes=5,  # 5 episodes per configuration
+                eval_grid_sizes=[20, 30] if config.training.multi_scale else [config.environment.base_grid_size],
+                eval_map_types=["empty", "random", "corridor", "cave"]  # Subset for speed
+            )
+            
+            # Log validation metrics to TensorBoard
+            if tb_logger.enabled:
+                # Overall validation metrics
+                tb_logger.log_scalar('val/coverage', eval_metrics['overall']['coverage_mean'], episode)
+                tb_logger.log_scalar('val/coverage_std', eval_metrics['overall']['coverage_std'], episode)
+                tb_logger.log_scalar('val/reward', eval_metrics['overall']['reward_mean'], episode)
+                tb_logger.log_scalar('val/steps', eval_metrics['overall']['steps_mean'], episode)
+                tb_logger.log_scalar('val/efficiency', eval_metrics['overall']['efficiency_mean'], episode)
+                
+                # Per grid size validation
+                for size, size_metrics in eval_metrics['by_size'].items():
+                    tb_logger.log_scalar(f'val_size/coverage_{size}x{size}', 
+                                        size_metrics['coverage_mean'], episode)
+                
+                # Per map type validation
+                for map_type, type_metrics in eval_metrics['by_type'].items():
+                    tb_logger.log_scalar(f'val_type/{map_type}_coverage', 
+                                        type_metrics['coverage_mean'], episode)
+            
+            # Update best model based on validation coverage
+            val_coverage = eval_metrics['overall']['coverage_mean']
+            if val_coverage > best_coverage:
+                best_coverage = val_coverage
+                save_path = os.path.join(config.checkpoint_dir, 
+                                        f"{config.experiment_name}_best.pt")
+                agent.save(save_path)
+                print(f"✅ New best validation coverage: {best_coverage*100:.1f}% (model saved)")
+            else:
+                print(f"   Current best: {best_coverage*100:.1f}%")
     
     print("-"*70)
     print("Training complete!")
