@@ -109,20 +109,33 @@ class EnvironmentConfig:
     sensor_range_ratio: float = 0.2  # sensor_range = grid_size * ratio
     max_steps_ratio: float = 350  # max_steps = ratio * (grid_size / 20)^2
     obstacle_density: float = 0.15  # Fraction of cells that are obstacles
-    
-    # Rewards
-    coverage_reward: float = 1.0
-    revisit_penalty: float = -0.1
-    collision_penalty: float = -0.5
-    step_penalty: float = -0.01
-    
+
+    # Reward configuration (matches coverage_env.py RewardFunction)
+    coverage_reward: float = 10.0  # Reward for new coverage
+    revisit_penalty: float = -0.5  # Penalty for revisiting
+    collision_penalty: float = -5.0  # Penalty for collision
+    step_penalty: float = -0.01  # Small step penalty
+    frontier_bonus: float = 2.0  # Bonus for frontier exploration
+    coverage_confidence_weight: float = 0.5  # Weight for coverage confidence
+
     def get_sensor_range(self, grid_size: int) -> float:
         """Get sensor range for given grid size."""
         return grid_size * self.sensor_range_ratio
-    
+
     def get_max_steps(self, grid_size: int) -> int:
         """Get max steps for given grid size."""
         return int(self.max_steps_ratio * (grid_size / self.base_grid_size) ** 2)
+
+    def get_reward_config(self) -> dict:
+        """Get reward configuration as dictionary for CoverageEnvironment."""
+        return {
+            'coverage_reward': self.coverage_reward,
+            'revisit_penalty': self.revisit_penalty,
+            'collision_penalty': self.collision_penalty,
+            'step_penalty': self.step_penalty,
+            'frontier_bonus': self.frontier_bonus,
+            'coverage_confidence_weight': self.coverage_confidence_weight
+        }
 
 
 @dataclass

@@ -49,22 +49,15 @@ def create_environment(grid_size: int, config: ExperimentConfig) -> CoverageEnvi
     """
     sensor_range = config.environment.get_sensor_range(grid_size)
     max_steps = config.environment.get_max_steps(grid_size)
-    
-    # Extract reward configuration from environment config
-    reward_config = {
-        'coverage_reward': 10.0,
-        'revisit_penalty': -0.5,
-        'collision_penalty': -5.0,
-        'step_penalty': -0.01,
-        'frontier_bonus': 2.0,
-        'coverage_confidence_weight': 0.5
-    }
-    
+
+    # FIXED: Use reward configuration from config (not hard-coded!)
+    reward_config = config.environment.get_reward_config()
+
     env = CoverageEnvironment(
         grid_size=grid_size,
         num_agents=1,  # Single agent for now
         sensor_range=sensor_range,
-        obstacle_density=0.15,
+        obstacle_density=config.environment.obstacle_density,
         max_steps=max_steps,
         seed=config.training.seed,
         reward_config=reward_config

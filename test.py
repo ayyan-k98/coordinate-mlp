@@ -15,55 +15,39 @@ from dqn_agent import CoordinateDQNAgent
 from config import get_default_config, ExperimentConfig
 from metrics import CoverageMetrics, aggregate_metrics
 from visualization import plot_grid_size_comparison
+from coverage_env import CoverageEnvironment
 
 
 def create_test_environment(grid_size: int, config: ExperimentConfig, seed: int = None):
     """
-    Create test environment (mock version).
-    
-    Replace with your actual environment.
+    Create test environment using REAL CoverageEnvironment.
+
+    FIXED: Previously used MockTestEnv which had fake degradation factor.
+    Now uses actual environment for valid scale-invariance testing.
+
+    Args:
+        grid_size: Size of the grid
+        config: Experiment configuration
+        seed: Random seed for reproducibility
+
+    Returns:
+        CoverageEnvironment instance
     """
-    class MockTestEnv:
-        def __init__(self, grid_size, sensor_range, max_steps, seed):
-            self.grid_size = grid_size
-            self.sensor_range = sensor_range
-            self.max_steps = max_steps
-            if seed is not None:
-                np.random.seed(seed)
-            self.current_step = 0
-            
-        def reset(self):
-            self.current_step = 0
-            return np.random.randn(5, self.grid_size, self.grid_size)
-        
-        def step(self, action):
-            self.current_step += 1
-            next_state = np.random.randn(5, self.grid_size, self.grid_size)
-            reward = np.random.randn()
-            done = self.current_step >= self.max_steps
-            
-            # Simulate coverage increasing
-            base_coverage = min(0.3 + self.current_step / self.max_steps * 0.2, 0.5)
-            # Add some grid-size degradation
-            size_factor = 20 / self.grid_size
-            coverage = base_coverage * size_factor
-            
-            info = {
-                'coverage_pct': coverage,
-                'steps': self.current_step,
-                'num_covered': int(coverage * self.grid_size ** 2),
-                'total_cells': self.grid_size ** 2
-            }
-            
-            return next_state, reward, done, info
-        
-        def get_valid_actions(self):
-            return np.ones(9, dtype=bool)
-    
     sensor_range = config.environment.get_sensor_range(grid_size)
     max_steps = config.environment.get_max_steps(grid_size)
-    
-    return MockTestEnv(grid_size, sensor_range, max_steps, seed)
+
+    # Use REAL environment for valid evaluation
+    env = CoverageEnvironment(
+        grid_size=grid_size,
+        num_agents=1,
+        sensor_range=sensor_range,
+        obstacle_density=0.15,
+        max_steps=max_steps,
+        seed=seed,
+        reward_config=None  # Use default rewards
+    )
+
+    return env
 
 
 def test_agent_on_size(

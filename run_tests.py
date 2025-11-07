@@ -34,18 +34,19 @@ def main():
     print("Running All Unit Tests")
     print("="*70)
     
+    # FIXED: Removed 'src.' prefixes - using flat directory structure
     tests = [
-        ("src.models.positional_encoding", "Fourier Positional Encoding"),
-        ("src.models.cell_encoder", "Cell Feature MLP"),
-        ("src.models.attention", "Attention Pooling"),
-        ("src.models.q_network", "Dueling Q-Network"),
-        ("src.models.coordinate_network", "Coordinate Coverage Network"),
-        ("src.agent.replay_buffer", "Replay Buffer"),
-        ("src.agent.dqn_agent", "DQN Agent"),
-        ("src.config", "Configuration"),
-        ("src.utils.logger", "Logger"),
-        ("src.utils.metrics", "Metrics"),
-        ("src.utils.visualization", "Visualization"),
+        ("positional_encoding", "Fourier Positional Encoding"),
+        ("cell_encoder", "Cell Feature MLP"),
+        ("attention", "Attention Pooling"),
+        ("q_network", "Dueling Q-Network"),
+        ("coordinate_network", "Coordinate Coverage Network"),
+        ("replay_buffer", "Replay Buffer"),
+        ("dqn_agent", "DQN Agent"),
+        ("config", "Configuration"),
+        ("logger", "Logger"),
+        ("metrics", "Metrics"),
+        ("visualization", "Visualization"),
     ]
     
     results = []
