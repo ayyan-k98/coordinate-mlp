@@ -355,12 +355,16 @@ class RewardFunction:
         enable_early_completion: bool = True,  # Enable early completion bonus
         early_completion_threshold: float = 0.95,  # Coverage threshold for bonus
         early_completion_bonus: float = 20.0,  # 10× scaled: base bonus (was 2.0)
-        time_bonus_per_step_saved: float = 0.1  # 10× scaled: time bonus (was 0.01)
+        time_bonus_per_step_saved: float = 0.1,  # 10× scaled: time bonus (was 0.01)
+        use_progressive_revisit_penalty: bool = True,  # Progressive penalty scaling
+        revisit_penalty_min: float = -0.1,  # Initial revisit penalty (lenient early on)
+        revisit_penalty_max: float = -0.5,  # Final revisit penalty (strict later)
+        max_steps: int = 500  # Maximum steps per episode (for calculating progress ratio)
     ):
         """
         Args:
             coverage_reward: Reward per newly covered cell
-            revisit_penalty: Penalty for revisiting covered cell
+            revisit_penalty: Penalty for revisiting covered cell (used as max if progressive enabled)
             collision_penalty: Penalty for collision with obstacle
             step_penalty: Small penalty per step (encourages efficiency)
             frontier_bonus: Bonus for moving to frontier cell
@@ -374,6 +378,10 @@ class RewardFunction:
             early_completion_threshold: Coverage percentage to trigger bonus (e.g., 0.95 = 95%)
             early_completion_bonus: Base bonus for completing coverage goal
             time_bonus_per_step_saved: Additional bonus per step saved from max_steps
+            use_progressive_revisit_penalty: Enable progressive penalty that scales with episode progress
+            revisit_penalty_min: Initial revisit penalty (lenient early on)
+            revisit_penalty_max: Final revisit penalty (strict later)
+            max_steps: Maximum steps per episode (for calculating progress ratio)
         """
         self.coverage_reward = coverage_reward
         self.revisit_penalty = revisit_penalty
@@ -381,16 +389,26 @@ class RewardFunction:
         self.step_penalty = step_penalty
         self.frontier_bonus = frontier_bonus
         self.confidence_weight = coverage_confidence_weight
+
+        # Rotation penalty
         self.use_rotation_penalty = use_rotation_penalty
         self.rotation_penalty_small = rotation_penalty_small
         self.rotation_penalty_medium = rotation_penalty_medium
         self.rotation_penalty_large = rotation_penalty_large
         self.stay_penalty = stay_penalty
+
+        # Early completion bonus
         self.enable_early_completion = enable_early_completion
         self.early_completion_threshold = early_completion_threshold
         self.early_completion_bonus = early_completion_bonus
         self.time_bonus_per_step_saved = time_bonus_per_step_saved
-        
+
+        # Progressive revisit penalty
+        self.use_progressive_revisit = use_progressive_revisit_penalty
+        self.revisit_penalty_min = revisit_penalty_min
+        self.revisit_penalty_max = revisit_penalty_max
+        self.max_steps = max_steps
+
         # Action angles for rotation computation
         # N=0°, NE=45°, E=90°, SE=135°, S=180°, SW=225°, W=270°, NW=315°
         self.action_angles = {
@@ -484,7 +502,7 @@ class RewardFunction:
         time_bonus = steps_saved * self.time_bonus_per_step_saved
         
         total_bonus = bonus + time_bonus
-        
+
         return total_bonus
     
     def compute_reward(
@@ -521,9 +539,18 @@ class RewardFunction:
         confidence_r = confidence_gain * self.confidence_weight
         breakdown['confidence'] = confidence_r
         
-        # 3. Revisit penalty
+        # 3. Revisit penalty (progressive: scales from lenient to strict)
         if state.visited[agent.y, agent.x]:
-            revisit_r = self.revisit_penalty
+            if self.use_progressive_revisit:
+                # Calculate progress ratio (0.0 at start, 1.0 at max_steps)
+                progress = min(next_state.step / self.max_steps, 1.0)
+                # Linear interpolation: penalty grows from min to max
+                current_penalty = self.revisit_penalty_min + (
+                    self.revisit_penalty_max - self.revisit_penalty_min
+                ) * progress
+                revisit_r = current_penalty
+            else:
+                revisit_r = self.revisit_penalty
         else:
             revisit_r = 0.0
         breakdown['revisit'] = revisit_r
@@ -627,6 +654,8 @@ class CoverageEnvironment:
         # Reward function
         if reward_config is None:
             reward_config = {}
+        # Inject max_steps for progressive penalty calculation
+        reward_config['max_steps'] = max_steps
         self.reward_fn = RewardFunction(**reward_config)
         
         # State

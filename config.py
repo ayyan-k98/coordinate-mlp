@@ -112,11 +112,16 @@ class EnvironmentConfig:
 
     # Reward configuration (matches coverage_env.py RewardFunction)
     coverage_reward: float = 10.0  # Reward for new coverage
-    revisit_penalty: float = -0.5  # Penalty for revisiting
+    revisit_penalty: float = -0.5  # Penalty for revisiting (used as max if progressive enabled)
     collision_penalty: float = -5.0  # Penalty for collision
     step_penalty: float = -0.01  # Small step penalty
     frontier_bonus: float = 2.0  # Bonus for frontier exploration
     coverage_confidence_weight: float = 0.5  # Weight for coverage confidence
+
+    # Progressive revisit penalty (scales from low to high as episode progresses)
+    use_progressive_revisit_penalty: bool = True  # Enable progressive penalty
+    revisit_penalty_min: float = -0.1  # Initial revisit penalty (lenient early on)
+    revisit_penalty_max: float = -0.5  # Final revisit penalty (strict later)
 
     def get_sensor_range(self, grid_size: int) -> float:
         """Get sensor range for given grid size."""
@@ -134,7 +139,10 @@ class EnvironmentConfig:
             'collision_penalty': self.collision_penalty,
             'step_penalty': self.step_penalty,
             'frontier_bonus': self.frontier_bonus,
-            'coverage_confidence_weight': self.coverage_confidence_weight
+            'coverage_confidence_weight': self.coverage_confidence_weight,
+            'use_progressive_revisit_penalty': self.use_progressive_revisit_penalty,
+            'revisit_penalty_min': self.revisit_penalty_min,
+            'revisit_penalty_max': self.revisit_penalty_max
         }
 
 
