@@ -280,19 +280,28 @@ class CoordinateDQNAgent:
         loss.backward()
         
         # Gradient clipping
-        torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), max_norm=10.0)
+        grad_norm = torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), max_norm=10.0)
         
         self.optimizer.step()
         
         # Update training steps
         self.training_steps += 1
         
-        # Return training metrics
+        # Compute TD error
+        td_error = (q_values - targets).abs()
+        
+        # Return enhanced training metrics
         return {
             'loss': loss.item(),
             'q_mean': q_values.mean().item(),
             'q_max': q_values.max().item(),
+            'q_min': q_values.min().item(),
+            'q_std': q_values.std().item(),
             'target_mean': targets.mean().item(),
+            'target_std': targets.std().item(),
+            'td_error_mean': td_error.mean().item(),
+            'td_error_max': td_error.max().item(),
+            'grad_norm': grad_norm.item(),
         }
     
     def update_target_network(self):

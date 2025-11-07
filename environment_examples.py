@@ -16,7 +16,13 @@ import os
 # Add project to path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from environment import CoverageEnvironment
+from coverage_env import (
+    CoverageEnvironment, 
+    Action, 
+    ProbabilisticSensorModel,
+    RewardFunction,
+    FrontierDetector
+)
 
 
 def example1_basic_episode():
@@ -455,7 +461,7 @@ if __name__ == "__main__":
     """Run all examples."""
     
     # Import here to avoid issues
-    from src.environment.coverage_env import ACTION_TO_DELTA
+    from coverage_env import ACTION_TO_DELTA
     
     print("\n" + "="*80)
     print("COMPLETE ENVIRONMENT EXAMPLES")

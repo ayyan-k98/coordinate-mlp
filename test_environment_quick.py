@@ -9,7 +9,7 @@ import os
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '.')))
 
-from src.environment import CoverageEnvironment, Action
+from coverage_env import CoverageEnvironment, Action
 
 print("="*70)
 print("ENVIRONMENT QUICK TEST")
@@ -68,7 +68,7 @@ for action in list(Action)[:4]:  # Show first 4
 
 # Test 6: Sensor model
 print("\n[Test 6] Sensor model...")
-from src.environment.coverage_env import ProbabilisticSensorModel
+from coverage_env import ProbabilisticSensorModel
 sensor = ProbabilisticSensorModel(max_range=4.0)
 for dist in [0.0, 1.0, 2.0, 3.0, 4.0]:
     prob = sensor.get_detection_probability(dist)

@@ -7,6 +7,7 @@ Supports single-scale and multi-scale curriculum training.
 import os
 import argparse
 import random
+import time
 import numpy as np
 import torch
 from typing import Optional
@@ -15,7 +16,7 @@ from dqn_agent import CoordinateDQNAgent
 from config import get_default_config, ExperimentConfig
 from logger import Logger, TensorBoardLogger
 from metrics import compute_metrics, aggregate_metrics
-from coverage_env import CoverageEnvironment  # Fixed: Use coverage_env (returns numpy arrays)
+from coverage_env import CoverageEnvironment
 from performance_optimizations import (
     PerformanceConfig,
     setup_performance_optimizations,
@@ -90,11 +91,17 @@ def train_episode(
     Returns:
         Dictionary of episode metrics
     """
+    # Start timing
+    start_time = time.time()
+    
     state = env.reset()
     done = False
     episode_reward = 0
     episode_steps = 0
     losses = []
+    q_values_list = []
+    td_errors_list = []
+    grad_norms_list = []
     
     while not done:
         # Select action
@@ -112,6 +119,9 @@ def train_episode(
             update_info = agent.update()
             if update_info:
                 losses.append(update_info['loss'])
+                q_values_list.append(update_info['q_mean'])
+                td_errors_list.append(update_info['td_error_mean'])
+                grad_norms_list.append(update_info['grad_norm'])
         
         state = next_state
         episode_reward += reward
@@ -120,7 +130,14 @@ def train_episode(
     # Decay epsilon
     agent.decay_epsilon()
     
-    # Compile metrics
+    # Compute timing metrics
+    episode_time = time.time() - start_time
+    steps_per_second = episode_steps / episode_time if episode_time > 0 else 0.0
+    
+    # Compute efficiency metrics
+    efficiency = info['coverage_pct'] / episode_steps if episode_steps > 0 else 0.0
+    
+    # Compile enhanced metrics
     metrics = {
         'episode': episode,
         'reward': episode_reward,
@@ -128,10 +145,32 @@ def train_episode(
         'coverage': info['coverage_pct'],
         'epsilon': agent.epsilon,
         'memory_size': len(agent.memory),
+        # Performance metrics
+        'episode_time': episode_time,
+        'steps_per_second': steps_per_second,
+        # Coverage quality metrics
+        'efficiency': efficiency,
+        'collisions': info.get('collisions', 0),
+        'revisits': info.get('revisits', 0),
+        'num_frontiers': info.get('num_frontiers', 0),
+        # Reward breakdown
+        'reward_coverage': info.get('reward_breakdown', {}).get('coverage', 0),
+        'reward_confidence': info.get('reward_breakdown', {}).get('confidence', 0),
+        'reward_revisit': info.get('reward_breakdown', {}).get('revisit', 0),
+        'reward_frontier': info.get('reward_breakdown', {}).get('frontier', 0),
     }
     
+    # Training diagnostics
     if losses:
         metrics['loss'] = np.mean(losses)
+        metrics['loss_std'] = np.std(losses)
+    if q_values_list:
+        metrics['q_mean'] = np.mean(q_values_list)
+        metrics['q_std'] = np.std(q_values_list)
+    if td_errors_list:
+        metrics['td_error'] = np.mean(td_errors_list)
+    if grad_norms_list:
+        metrics['grad_norm'] = np.mean(grad_norms_list)
     
     return metrics
 
@@ -224,12 +263,54 @@ def train(config: ExperimentConfig):
         if episode % 10 == 0:
             logger.log_episode(episode, metrics)
         
+        # Enhanced TensorBoard logging
         if tb_logger.enabled:
+            # Basic metrics
             tb_logger.log_scalar('train/reward', metrics['reward'], episode)
             tb_logger.log_scalar('train/coverage', metrics['coverage'], episode)
             tb_logger.log_scalar('train/epsilon', metrics['epsilon'], episode)
+            tb_logger.log_scalar('train/steps', metrics['steps'], episode)
+            
+            # Performance metrics
+            tb_logger.log_scalar('perf/episode_time', metrics.get('episode_time', 0), episode)
+            tb_logger.log_scalar('perf/steps_per_second', metrics.get('steps_per_second', 0), episode)
+            
+            # Coverage quality metrics
+            tb_logger.log_scalar('coverage/efficiency', metrics.get('efficiency', 0), episode)
+            tb_logger.log_scalar('coverage/collisions', metrics.get('collisions', 0), episode)
+            tb_logger.log_scalar('coverage/revisits', metrics.get('revisits', 0), episode)
+            tb_logger.log_scalar('coverage/num_frontiers', metrics.get('num_frontiers', 0), episode)
+            
+            # Reward breakdown
+            if 'reward_coverage' in metrics:
+                reward_components = {
+                    'coverage': metrics.get('reward_coverage', 0),
+                    'confidence': metrics.get('reward_confidence', 0),
+                    'revisit': metrics.get('reward_revisit', 0),
+                    'frontier': metrics.get('reward_frontier', 0),
+                }
+                tb_logger.log_scalars('reward/breakdown', reward_components, episode)
+            
+            # Training diagnostics
             if 'loss' in metrics:
                 tb_logger.log_scalar('train/loss', metrics['loss'], episode)
+                if 'loss_std' in metrics:
+                    tb_logger.log_scalar('train/loss_std', metrics['loss_std'], episode)
+            
+            if 'q_mean' in metrics:
+                tb_logger.log_scalar('train/q_mean', metrics['q_mean'], episode)
+                tb_logger.log_scalar('train/q_std', metrics.get('q_std', 0), episode)
+            
+            if 'td_error' in metrics:
+                tb_logger.log_scalar('train/td_error', metrics['td_error'], episode)
+            
+            if 'grad_norm' in metrics:
+                tb_logger.log_scalar('train/grad_norm', metrics['grad_norm'], episode)
+            
+            # Multi-scale tracking
+            if config.training.multi_scale:
+                tb_logger.log_scalar(f'multiscale/coverage_{grid_size}x{grid_size}', 
+                                    metrics['coverage'], episode)
         
         # Save best model
         if metrics['coverage'] > best_coverage:

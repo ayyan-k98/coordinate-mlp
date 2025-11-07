@@ -461,21 +461,21 @@ def print_statistics(metrics: CoverageMetrics, window: int = 100, training_time:
 
 if __name__ == "__main__":
     # Test visualization with dummy data
-    from environment import CoverageEnvironment
-    from fcn_agent import FCNAgent  # Use FCN agent instead
+    from coverage_env import CoverageEnvironment
+    from dqn_agent import CoordinateDQNAgent
 
     print("Testing visualization utilities...")
 
     # Create dummy environment
-    env = CoverageEnvironment(grid_size=20, map_type="room")
+    env = CoverageEnvironment(grid_size=20)
     state = env.reset()
 
     # Run a few steps
-    agent = FCNAgent(grid_size=20)
-    trajectory = [state.position]
+    agent = CoordinateDQNAgent(input_channels=5, num_actions=9, device='cpu')
+    trajectory = []
 
     for _ in range(20):
-        action = agent.select_action(state, env.world_state)
+        action = agent.select_action(state, epsilon=0.5)
         next_state, reward, done, info = env.step(action)
         trajectory.append(next_state.position)
         state = next_state
