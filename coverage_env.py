@@ -67,8 +67,11 @@ class CoverageState:
     height: int
     width: int
     
-    # Obstacles (static)
-    obstacles: np.ndarray  # [H, W] boolean array
+    # Obstacles (static, ground truth - NOT observed by agent)
+    obstacles: np.ndarray  # [H, W] boolean array (GROUND TRUTH)
+    
+    # Obstacle belief (what the agent has discovered through sensing)
+    obstacle_belief: np.ndarray  # [H, W] float - probability of obstacle [0, 1]
     
     # Coverage information
     visited: np.ndarray  # [H, W] boolean - ever visited
@@ -83,6 +86,9 @@ class CoverageState:
     
     # Step counter
     step: int = 0
+    
+    # Last action (for rotation penalty tracking)
+    last_action: Optional[int] = None
     
     def copy(self) -> 'CoverageState':
         """Deep copy of state."""
@@ -328,16 +334,28 @@ class RewardFunction:
     - Collisions (negative)
     - Step penalty (negative)
     - Frontier exploration (positive)
+    - Rotation penalty (negative, encourages smooth paths)
+    - STAY penalty (negative, encourages movement)
+    - Early completion bonus (positive, rewards fast completion)
     """
     
     def __init__(
         self,
-        coverage_reward: float = 10.0,
-        revisit_penalty: float = -0.5,
-        collision_penalty: float = -5.0,
-        step_penalty: float = -0.01,
-        frontier_bonus: float = 2.0,
-        coverage_confidence_weight: float = 0.5
+        coverage_reward: float = 0.2,  # 10× scaled: ~68 per episode (was 0.02)
+        revisit_penalty: float = -0.5,  # 10× scaled: meaningful penalty (was -0.05)
+        collision_penalty: float = -5.0,  # 10× scaled: strong deterrent (was -0.5)
+        step_penalty: float = -0.05,  # 10× scaled: efficiency pressure (was -0.005)
+        frontier_bonus: float = 0.5,  # 10× scaled: exploration bonus (was 0.05)
+        coverage_confidence_weight: float = 0.1,  # 10× scaled: confidence weight (was 0.01)
+        use_rotation_penalty: bool = True,
+        rotation_penalty_small: float = -0.1,  # ≤45° 10× scaled (was -0.01)
+        rotation_penalty_medium: float = -0.2,  # ≤90° 10× scaled (was -0.02)
+        rotation_penalty_large: float = -0.5,  # >90° 10× scaled (was -0.05)
+        stay_penalty: float = -1.0,  # 10× scaled: movement incentive (was -0.1)
+        enable_early_completion: bool = True,  # Enable early completion bonus
+        early_completion_threshold: float = 0.95,  # Coverage threshold for bonus
+        early_completion_bonus: float = 20.0,  # 10× scaled: base bonus (was 2.0)
+        time_bonus_per_step_saved: float = 0.1  # 10× scaled: time bonus (was 0.01)
     ):
         """
         Args:
@@ -347,6 +365,15 @@ class RewardFunction:
             step_penalty: Small penalty per step (encourages efficiency)
             frontier_bonus: Bonus for moving to frontier cell
             coverage_confidence_weight: How much to weight coverage confidence
+            use_rotation_penalty: Enable rotation penalty
+            rotation_penalty_small: Penalty for small rotations (≤45°)
+            rotation_penalty_medium: Penalty for medium rotations (≤90°)
+            rotation_penalty_large: Penalty for large rotations (>90°)
+            stay_penalty: Penalty for STAY action (encourages movement)
+            enable_early_completion: Enable early completion bonus
+            early_completion_threshold: Coverage percentage to trigger bonus (e.g., 0.95 = 95%)
+            early_completion_bonus: Base bonus for completing coverage goal
+            time_bonus_per_step_saved: Additional bonus per step saved from max_steps
         """
         self.coverage_reward = coverage_reward
         self.revisit_penalty = revisit_penalty
@@ -354,6 +381,111 @@ class RewardFunction:
         self.step_penalty = step_penalty
         self.frontier_bonus = frontier_bonus
         self.confidence_weight = coverage_confidence_weight
+        self.use_rotation_penalty = use_rotation_penalty
+        self.rotation_penalty_small = rotation_penalty_small
+        self.rotation_penalty_medium = rotation_penalty_medium
+        self.rotation_penalty_large = rotation_penalty_large
+        self.stay_penalty = stay_penalty
+        self.enable_early_completion = enable_early_completion
+        self.early_completion_threshold = early_completion_threshold
+        self.early_completion_bonus = early_completion_bonus
+        self.time_bonus_per_step_saved = time_bonus_per_step_saved
+        
+        # Action angles for rotation computation
+        # N=0°, NE=45°, E=90°, SE=135°, S=180°, SW=225°, W=270°, NW=315°
+        self.action_angles = {
+            Action.NORTH: 0,
+            Action.NORTHEAST: 45,
+            Action.EAST: 90,
+            Action.SOUTHEAST: 135,
+            Action.SOUTH: 180,
+            Action.SOUTHWEST: 225,
+            Action.WEST: 270,
+            Action.NORTHWEST: 315,
+            Action.STAY: None  # No direction
+        }
+    
+    
+    def _compute_rotation_penalty(self, prev_action: Optional[int], current_action: int) -> float:
+        """
+        Compute penalty based on direction change between actions.
+        
+        Encourages smooth trajectories by penalizing sharp turns.
+        
+        Args:
+            prev_action: Previous action [0-8] or None
+            current_action: Current action [0-8]
+        
+        Returns:
+            Negative reward proportional to rotation angle (0 to -0.15)
+        """
+        if not self.use_rotation_penalty:
+            return 0.0
+        
+        # No penalty on first move or after STAY
+        if prev_action is None or prev_action == Action.STAY:
+            return 0.0
+        
+        # STAY action has no rotation
+        if current_action == Action.STAY:
+            return 0.0
+        
+        # Get angles for both actions
+        prev_angle = self.action_angles[Action(prev_action)]
+        current_angle = self.action_angles[Action(current_action)]
+        
+        # Calculate minimum rotation (accounting for 360° wrap-around)
+        angle_diff = abs(current_angle - prev_angle)
+        angle_diff = min(angle_diff, 360 - angle_diff)
+        
+        # Apply graduated penalties based on rotation magnitude
+        if angle_diff == 0:
+            return 0.0  # No rotation
+        elif angle_diff <= 45:
+            return self.rotation_penalty_small   # -0.05
+        elif angle_diff <= 90:
+            return self.rotation_penalty_medium  # -0.10
+        else:  # 135° or 180°
+            return self.rotation_penalty_large   # -0.15
+    
+    def compute_early_completion_bonus(
+        self,
+        coverage_percentage: float,
+        current_step: int,
+        max_steps: int
+    ) -> float:
+        """
+        Compute bonus for completing coverage early.
+        
+        Rewards agents that:
+        1. Reach high coverage (>= threshold, e.g., 95%)
+        2. Complete quickly (fewer steps = higher bonus)
+        
+        Args:
+            coverage_percentage: Current coverage percentage [0, 1]
+            current_step: Current step number
+            max_steps: Maximum allowed steps
+        
+        Returns:
+            Completion bonus (0 if not completed, or large positive if completed early)
+        """
+        if not self.enable_early_completion:
+            return 0.0
+        
+        # Check if coverage threshold reached
+        if coverage_percentage < self.early_completion_threshold:
+            return 0.0
+        
+        # Base bonus for completing coverage
+        bonus = self.early_completion_bonus
+        
+        # Additional time bonus for steps saved
+        steps_saved = max(0, max_steps - current_step)
+        time_bonus = steps_saved * self.time_bonus_per_step_saved
+        
+        total_bonus = bonus + time_bonus
+        
+        return total_bonus
     
     def compute_reward(
         self,
@@ -396,21 +528,32 @@ class RewardFunction:
             revisit_r = 0.0
         breakdown['revisit'] = revisit_r
         
-        # 4. Collision penalty
+        # 4. Rotation penalty (NEW)
+        rotation_r = self._compute_rotation_penalty(state.last_action, int(action))
+        breakdown['rotation'] = rotation_r
+        
+        # 5. Collision penalty
         if next_state.obstacles[agent.y, agent.x]:
             collision_r = self.collision_penalty
         else:
             collision_r = 0.0
         breakdown['collision'] = collision_r
         
-        # 5. Frontier bonus
+        # 6. Frontier bonus (moved from 5)
         if (agent.y, agent.x) in next_state.frontiers:
             frontier_r = self.frontier_bonus
         else:
             frontier_r = 0.0
         breakdown['frontier'] = frontier_r
         
-        # 6. Step penalty (encourages efficiency)
+        # 7. STAY penalty (encourages movement)
+        if int(action) == Action.STAY:
+            stay_r = self.stay_penalty
+        else:
+            stay_r = 0.0
+        breakdown['stay'] = stay_r
+        
+        # 8. Step penalty (encourages efficiency)
         breakdown['step'] = self.step_penalty
         
         # Total reward
@@ -635,9 +778,12 @@ class CoverageEnvironment:
         coverage = np.zeros((self.grid_size, self.grid_size), dtype=float)
         coverage_confidence = np.zeros((self.grid_size, self.grid_size), dtype=float)
         
-        # Initial sensing for each agent
+        # Initialize obstacle belief (starts with NO knowledge of obstacles)
+        obstacle_belief = np.zeros((self.grid_size, self.grid_size), dtype=float)
+        
+        # Initial sensing for each agent (will update obstacle_belief)
         for agent in agents:
-            self._update_coverage(agent, coverage, coverage_confidence, obstacles, visited)
+            self._update_coverage(agent, coverage, coverage_confidence, obstacles, visited, obstacle_belief)
         
         # Detect frontiers
         frontiers = self.frontier_detector.detect_frontiers(visited, obstacles)
@@ -646,13 +792,15 @@ class CoverageEnvironment:
         self.state = CoverageState(
             height=self.grid_size,
             width=self.grid_size,
-            obstacles=obstacles,
+            obstacles=obstacles,  # Ground truth (hidden from agent)
+            obstacle_belief=obstacle_belief,  # Agent's belief (starts at zero)
             visited=visited,
             coverage=coverage,
             coverage_confidence=coverage_confidence,
             agents=agents,
             frontiers=frontiers,
-            step=0
+            step=0,
+            last_action=None  # No previous action at start
         )
         
         # Reset statistics
@@ -671,12 +819,21 @@ class CoverageEnvironment:
         coverage: np.ndarray,
         coverage_confidence: np.ndarray,
         obstacles: np.ndarray,
-        visited: np.ndarray
+        visited: np.ndarray,
+        obstacle_belief: np.ndarray
     ):
         """
-        Update coverage based on agent's sensing.
+        Update coverage AND obstacle belief based on agent's sensing.
         
-        Uses probabilistic sensor model.
+        Uses probabilistic sensor model to detect both coverage and obstacles.
+        
+        Args:
+            agent: Agent performing the sensing
+            coverage: Coverage probability map to update
+            coverage_confidence: Confidence map to update
+            obstacles: Ground truth obstacles (for simulation)
+            visited: Visited cells map to update
+            obstacle_belief: Agent's belief about obstacles (UPDATED HERE)
         """
         # Get sensor footprint
         cells, probs = self.sensor_model.get_sensor_footprint(
@@ -684,30 +841,43 @@ class CoverageEnvironment:
         )
         
         for (y, x), prob in zip(cells, probs):
-            # Simulate sensing
+            # Simulate sensing (uses ground truth for simulation accuracy)
             detected, confidence = self.sensor_model.sense_cell(
                 distance=np.sqrt((x - agent.x)**2 + (y - agent.y)**2),
                 is_obstacle=obstacles[y, x]
             )
             
-            if detected and not obstacles[y, x]:
-                # Update coverage with Bayesian update
-                # Prior: current coverage
-                # Likelihood: detection probability
-                # Posterior: updated coverage
-                
-                prior = coverage[y, x]
-                likelihood = prob
-                
-                # Bayesian update (simplified)
-                posterior = prior + (1 - prior) * likelihood
-                coverage[y, x] = min(1.0, posterior)
-                
-                # Update confidence
-                coverage_confidence[y, x] = min(1.0, coverage_confidence[y, x] + confidence * 0.1)
-                
-                # Mark as visited
-                visited[y, x] = True
+            # Update obstacle belief (CRITICAL: This is what the agent learns!)
+            if obstacles[y, x]:
+                # This cell IS an obstacle (ground truth)
+                # Agent's sensor detects it with probability `detected`
+                if detected:
+                    # Detected as obstacle - increase belief
+                    obstacle_belief[y, x] = min(1.0, obstacle_belief[y, x] + prob * 0.8)
+            else:
+                # This cell is NOT an obstacle (ground truth)
+                # If detected, we know it's free space
+                if detected:
+                    # Detected as free - decrease obstacle belief (confirm it's clear)
+                    obstacle_belief[y, x] = max(0.0, obstacle_belief[y, x] - prob * 0.5)
+                    
+                    # Update coverage with Bayesian update
+                    # Prior: current coverage
+                    # Likelihood: detection probability
+                    # Posterior: updated coverage
+                    
+                    prior = coverage[y, x]
+                    likelihood = prob
+                    
+                    # Bayesian update (simplified)
+                    posterior = prior + (1 - prior) * likelihood
+                    coverage[y, x] = min(1.0, posterior)
+                    
+                    # Update confidence
+                    coverage_confidence[y, x] = min(1.0, coverage_confidence[y, x] + confidence * 0.1)
+                    
+                    # Mark as visited
+                    visited[y, x] = True
     
     def step(self, action: int, agent_id: int = 0) -> Tuple[np.ndarray, float, bool, Dict]:
         """
@@ -755,13 +925,14 @@ class CoverageEnvironment:
         if self.state.visited[agent.y, agent.x]:
             self.episode_stats['revisits'] += 1
         
-        # Update coverage based on new position
+        # Update coverage AND obstacle belief based on new position
         self._update_coverage(
             agent,
             self.state.coverage,
             self.state.coverage_confidence,
             self.state.obstacles,
-            self.state.visited
+            self.state.visited,
+            self.state.obstacle_belief  # Now updates obstacle belief!
         )
         
         # Update frontiers
@@ -773,10 +944,28 @@ class CoverageEnvironment:
         # Increment step
         self.state.step += 1
         
+        # Update last action for rotation penalty tracking
+        self.state.last_action = action
+        
         # Compute reward
         reward, reward_breakdown = self.reward_fn.compute_reward(
             prev_state, self.state, Action(action), agent_id
         )
+        
+        # Compute coverage percentage for early completion check
+        coverage_pct = self._compute_coverage_percentage()
+        
+        # Check for early completion bonus
+        early_completion_bonus = self.reward_fn.compute_early_completion_bonus(
+            coverage_pct, self.state.step, self.max_steps
+        )
+        
+        if early_completion_bonus > 0:
+            reward_breakdown['early_completion'] = early_completion_bonus
+            reward += early_completion_bonus
+        else:
+            reward_breakdown['early_completion'] = 0.0
+        
         self.episode_stats['total_reward'] += reward
         
         # Check done
@@ -834,14 +1023,19 @@ class CoverageEnvironment:
         for y, x in self.state.frontiers:
             obs[3, y, x] = 1.0
         
-        # Channel 4: Obstacles
-        obs[4] = self.state.obstacles.astype(np.float32)
+        # Channel 4: Obstacle Belief (NOT ground truth!)
+        # Agent only knows what it has sensed, not the true obstacle map
+        obs[4] = self.state.obstacle_belief
         
         return obs
     
     def get_valid_actions(self, agent_id: int = 0) -> np.ndarray:
         """
         Get boolean mask of valid actions.
+        
+        CRITICAL: Uses OBSTACLE_BELIEF (not ground truth) to determine validity.
+        This allows the agent to attempt moves into unknown cells and learn from
+        collision penalties.
         
         Args:
             agent_id: Which agent
@@ -853,20 +1047,25 @@ class CoverageEnvironment:
         
         agent = self.state.agents[agent_id]
         
+        # Obstacle belief threshold for considering a cell "blocked"
+        # If belief > 0.7, assume it's an obstacle and mark as invalid
+        # If belief < 0.7, allow the action (agent might discover obstacle!)
+        obstacle_threshold = 0.7
+        
         for action in range(9):
             dy, dx = ACTION_TO_DELTA[Action(action)]
             new_x = agent.x + dx
             new_y = agent.y + dy
             
-            # Check bounds
+            # Check bounds (always enforced)
             if new_x < 0 or new_x >= self.grid_size or \
                new_y < 0 or new_y >= self.grid_size:
                 valid[action] = False
                 continue
             
-            # Check obstacle (optional: allow but penalize)
-            # Here we mark as invalid to prevent collisions
-            if self.state.obstacles[new_y, new_x]:
+            # Check obstacle BELIEF (not ground truth!)
+            # Agent can only avoid obstacles it has discovered
+            if self.state.obstacle_belief[new_y, new_x] > obstacle_threshold:
                 valid[action] = False
         
         return valid
