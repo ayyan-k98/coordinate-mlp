@@ -15,7 +15,7 @@ from dqn_agent import CoordinateDQNAgent
 from config import get_default_config, ExperimentConfig
 from logger import Logger, TensorBoardLogger
 from metrics import compute_metrics, aggregate_metrics
-from environment import CoverageEnvironment
+from coverage_env import CoverageEnvironment  # Fixed: Use coverage_env (returns numpy arrays)
 from performance_optimizations import (
     PerformanceConfig,
     setup_performance_optimizations,
