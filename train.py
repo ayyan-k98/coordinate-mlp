@@ -17,6 +17,7 @@ from config import get_default_config, ExperimentConfig
 from logger import Logger, TensorBoardLogger
 from metrics import compute_metrics, aggregate_metrics
 from coverage_env import CoverageEnvironment
+from curriculum import CurriculumScheduler, create_default_curriculum, create_fast_curriculum, create_no_curriculum
 from performance_optimizations import (
     PerformanceConfig,
     setup_performance_optimizations,
@@ -174,12 +175,13 @@ def train_episode(
     return metrics
 
 
-def train(config: ExperimentConfig):
+def train(config: ExperimentConfig, curriculum_type: str = 'default'):
     """
     Main training loop.
-    
+
     Args:
         config: Experiment configuration
+        curriculum_type: Type of curriculum ('default', 'fast', or 'none')
     """
     print("="*70)
     print(f"Training Coordinate MLP Coverage Agent")
@@ -206,8 +208,14 @@ def train(config: ExperimentConfig):
     # Initialize mixed precision trainer
     mp_trainer = MixedPrecisionTrainer(enabled=perf_config.use_amp, device=device)
 
-    # Initialize curriculum scheduler
-    curriculum_config = create_default_curriculum()
+    # Initialize curriculum scheduler based on type
+    if curriculum_type == 'fast':
+        curriculum_config = create_fast_curriculum()
+    elif curriculum_type == 'none':
+        curriculum_config = create_no_curriculum()
+    else:  # 'default'
+        curriculum_config = create_default_curriculum()
+
     curriculum = CurriculumScheduler(
         curriculum_config,
         grid_sizes=config.training.grid_sizes if config.training.multi_scale else [config.environment.base_grid_size]
@@ -219,7 +227,7 @@ def train(config: ExperimentConfig):
         print(f"  Total Episodes: {curriculum.total_curriculum_episodes}")
         curriculum.print_status()
 
-    # Create agent
+    # Create agent (with mixed precision enabled)
     agent = CoordinateDQNAgent(
         input_channels=config.model.input_channels,
         num_actions=config.model.num_actions,
@@ -233,7 +241,8 @@ def train(config: ExperimentConfig):
         batch_size=config.training.batch_size,
         memory_capacity=config.training.memory_capacity,
         target_update_tau=config.training.target_update_tau,
-        device=config.training.device
+        device=config.training.device,
+        use_mixed_precision=perf_config.use_amp  # Enable AMP if available
     )
     
     print(f"\nAgent initialized:")
@@ -399,7 +408,7 @@ def main():
                        help='Curriculum type: default (full), fast (shorter), none (disabled)')
 
     args = parser.parse_args()
-    
+
     # Create configuration
     config = get_default_config()
     config.experiment_name = args.experiment_name
@@ -408,9 +417,9 @@ def main():
     config.training.device = args.device
     config.seed = args.seed
     config.model.hidden_dim = args.hidden_dim
-    
-    # Train
-    train(config)
+
+    # Train with curriculum
+    train(config, curriculum_type=args.curriculum)
 
 
 if __name__ == "__main__":

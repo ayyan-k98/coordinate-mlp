@@ -45,7 +45,8 @@ class CoordinateDQNAgent:
         sensor_range: Optional[float] = None,
         use_pomdp: bool = False,
         use_local_attention: bool = False,
-        attention_window_radius: int = 7
+        attention_window_radius: int = 7,
+        use_mixed_precision: bool = True
     ):
         """
         Args:
@@ -66,12 +67,21 @@ class CoordinateDQNAgent:
             use_pomdp: Whether to use POMDP with visibility masking
             use_local_attention: Whether to use local attention (faster for large grids)
             attention_window_radius: Radius for local attention window
+            use_mixed_precision: Whether to use mixed precision training (AMP)
         """
         self.device = torch.device(device)
         self.num_actions = num_actions
         self.gamma = gamma
         self.batch_size = batch_size
         self.target_update_tau = target_update_tau
+
+        # Mixed precision training
+        self.use_mixed_precision = use_mixed_precision and self.device.type == 'cuda'
+        if self.use_mixed_precision:
+            self.scaler = torch.cuda.amp.GradScaler()
+            print("  Mixed Precision (AMP): Enabled")
+        else:
+            self.scaler = None
         
         # POMDP settings
         self.sensor_range = sensor_range
@@ -237,59 +247,96 @@ class CoordinateDQNAgent:
     def update(self) -> Optional[dict]:
         """
         Perform one step of DQN training using Double DQN.
-        
+
         Returns:
             info: Dictionary with training metrics (loss, q_values, etc.)
                   Returns None if not enough samples in memory
         """
         if len(self.memory) < self.batch_size:
             return None
-        
+
         # Sample batch
         states, actions, rewards, next_states, dones = self.memory.sample(self.batch_size)
-        
+
         # Move to device
         states = states.to(self.device)
         actions = actions.to(self.device)
         rewards = rewards.to(self.device)
         next_states = next_states.to(self.device)
         dones = dones.to(self.device)
-        
-        # Current Q-values
-        q_values = self.policy_net(states)  # [batch, num_actions]
-        q_values = q_values.gather(1, actions)  # [batch, 1]
-        
-        # Target Q-values (Double DQN)
-        with torch.no_grad():
-            # Select best actions using policy network
-            next_q_policy = self.policy_net(next_states)
-            next_actions = next_q_policy.argmax(dim=1, keepdim=True)
-            
-            # Evaluate using target network
-            next_q_target = self.target_net(next_states)
-            next_q_values = next_q_target.gather(1, next_actions)
-            
-            # Bellman target
-            targets = rewards + self.gamma * next_q_values * (1 - dones)
-        
-        # Compute loss (Huber loss for robustness)
-        loss = nn.functional.smooth_l1_loss(q_values, targets)
-        
-        # Optimize
-        self.optimizer.zero_grad()
-        loss.backward()
-        
-        # Gradient clipping
-        grad_norm = torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), max_norm=10.0)
-        
-        self.optimizer.step()
-        
+
+        if self.use_mixed_precision:
+            # Mixed precision training path (2-3x faster on modern GPUs)
+            with torch.cuda.amp.autocast():
+                # Current Q-values
+                q_values = self.policy_net(states)  # [batch, num_actions]
+                q_values = q_values.gather(1, actions)  # [batch, 1]
+
+                # Target Q-values (Double DQN)
+                with torch.no_grad():
+                    # Select best actions using policy network
+                    next_q_policy = self.policy_net(next_states)
+                    next_actions = next_q_policy.argmax(dim=1, keepdim=True)
+
+                    # Evaluate using target network
+                    next_q_target = self.target_net(next_states)
+                    next_q_values = next_q_target.gather(1, next_actions)
+
+                    # Bellman target
+                    targets = rewards + self.gamma * next_q_values * (1 - dones)
+
+                # Compute loss (Huber loss for robustness)
+                loss = nn.functional.smooth_l1_loss(q_values, targets)
+
+            # Backward pass with gradient scaling
+            self.optimizer.zero_grad()
+            self.scaler.scale(loss).backward()
+
+            # Unscale before gradient clipping
+            self.scaler.unscale_(self.optimizer)
+            grad_norm = torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), max_norm=10.0)
+
+            # Optimizer step with scaling
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+
+        else:
+            # Standard FP32 training path
+            # Current Q-values
+            q_values = self.policy_net(states)  # [batch, num_actions]
+            q_values = q_values.gather(1, actions)  # [batch, 1]
+
+            # Target Q-values (Double DQN)
+            with torch.no_grad():
+                # Select best actions using policy network
+                next_q_policy = self.policy_net(next_states)
+                next_actions = next_q_policy.argmax(dim=1, keepdim=True)
+
+                # Evaluate using target network
+                next_q_target = self.target_net(next_states)
+                next_q_values = next_q_target.gather(1, next_actions)
+
+                # Bellman target
+                targets = rewards + self.gamma * next_q_values * (1 - dones)
+
+            # Compute loss (Huber loss for robustness)
+            loss = nn.functional.smooth_l1_loss(q_values, targets)
+
+            # Optimize
+            self.optimizer.zero_grad()
+            loss.backward()
+
+            # Gradient clipping
+            grad_norm = torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), max_norm=10.0)
+
+            self.optimizer.step()
+
         # Update training steps
         self.training_steps += 1
-        
+
         # Compute TD error
         td_error = (q_values - targets).abs()
-        
+
         # Return enhanced training metrics
         return {
             'loss': loss.item(),
