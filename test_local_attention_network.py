@@ -4,7 +4,7 @@ Test Local Attention Integration with Coordinate Network
 
 import torch
 import time
-from src.models.coordinate_network import CoordinateCoverageNetwork
+from coordinate_network import CoordinateCoverageNetwork
 
 
 def main():

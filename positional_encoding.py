@@ -86,34 +86,35 @@ class FourierPositionalEncoding(nn.Module):
         return self.output_dim
 
 
-def generate_normalized_coords(H: int, W: int, device: str = 'cpu') -> torch.Tensor:
+@torch.jit.script
+def generate_normalized_coords(H: int, W: int, device: torch.device) -> torch.Tensor:
     """
-    Generate normalized coordinates for H×W grid.
-    
+    Generate normalized coordinates for H×W grid (JIT optimized).
+
     Args:
         H: Grid height
         W: Grid width
         device: Device to create tensor on
-    
+
     Returns:
         coords: [H*W, 2] where each row is (x, y) ∈ [-1, 1]²
-    
+
     Example for 3×3 grid:
         [(-1.0, -1.0), (0.0, -1.0), (1.0, -1.0),
          (-1.0,  0.0), (0.0,  0.0), (1.0,  0.0),
          (-1.0,  1.0), (0.0,  1.0), (1.0,  1.0)]
     """
-    # Linspace in [-1, 1]
-    y_coords = torch.linspace(-1, 1, H, device=device)  # [H]
-    x_coords = torch.linspace(-1, 1, W, device=device)  # [W]
-    
+    # Linspace in [-1, 1] (vectorized)
+    y_coords = torch.linspace(-1.0, 1.0, H, device=device)  # [H]
+    x_coords = torch.linspace(-1.0, 1.0, W, device=device)  # [W]
+
     # Meshgrid (indexing='ij' for row-major order)
     grid_y, grid_x = torch.meshgrid(y_coords, x_coords, indexing='ij')  # [H, W] each
-    
-    # Stack and flatten
+
+    # Stack and flatten (single operation for better performance)
     coords = torch.stack([grid_x, grid_y], dim=-1)  # [H, W, 2]
     coords = coords.reshape(-1, 2)  # [H*W, 2]
-    
+
     return coords
 
 

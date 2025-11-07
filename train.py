@@ -11,11 +11,18 @@ import numpy as np
 import torch
 from typing import Optional
 
-from src.agent.dqn_agent import CoordinateDQNAgent
-from src.config import get_default_config, ExperimentConfig
-from src.utils.logger import Logger, TensorBoardLogger
-from src.utils.metrics import compute_metrics, aggregate_metrics
-from src.environment import CoverageEnvironment
+from dqn_agent import CoordinateDQNAgent
+from config import get_default_config, ExperimentConfig
+from logger import Logger, TensorBoardLogger
+from metrics import compute_metrics, aggregate_metrics
+from environment import CoverageEnvironment
+from performance_optimizations import (
+    PerformanceConfig,
+    setup_performance_optimizations,
+    optimize_model,
+    MixedPrecisionTrainer,
+    get_optimal_batch_size
+)
 
 
 def set_seed(seed: int):
@@ -143,10 +150,23 @@ def train(config: ExperimentConfig):
     
     # Set seed
     set_seed(config.seed)
-    
+
     # Create directories
     os.makedirs(config.log_dir, exist_ok=True)
     os.makedirs(config.checkpoint_dir, exist_ok=True)
+
+    # Setup performance optimizations
+    device = torch.device(config.training.device if torch.cuda.is_available() else 'cpu')
+    perf_config = PerformanceConfig(
+        use_amp=True,  # Mixed precision training (2-3x speedup)
+        compile_model=hasattr(torch, 'compile'),  # PyTorch 2.0+ compilation
+        use_cudnn_benchmark=True,  # Faster convolutions
+        use_tf32=True,  # TF32 for Ampere GPUs
+    )
+    setup_performance_optimizations(perf_config, device)
+
+    # Initialize mixed precision trainer
+    mp_trainer = MixedPrecisionTrainer(enabled=perf_config.use_amp, device=device)
     
     # Create agent
     agent = CoordinateDQNAgent(

@@ -8,9 +8,9 @@ import numpy as np
 import torch
 
 # Import core components
-from src.models.coordinate_network import CoordinateCoverageNetwork
-from src.agent.dqn_agent import CoordinateDQNAgent
-from src.config import get_default_config
+from coordinate_network import CoordinateCoverageNetwork
+from dqn_agent import CoordinateDQNAgent
+from config import get_default_config
 
 
 def example_1_network_forward_pass():

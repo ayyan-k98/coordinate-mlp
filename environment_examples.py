@@ -16,13 +16,7 @@ import os
 # Add project to path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.environment import (
-    CoverageEnvironment, 
-    Action, 
-    ProbabilisticSensorModel,
-    FrontierDetector,
-    RewardFunction
-)
+from environment import CoverageEnvironment
 
 
 def example1_basic_episode():

@@ -12,8 +12,8 @@ import numpy as np
 from typing import Optional, Tuple
 import random
 
-from ..models.coordinate_network import CoordinateCoverageNetwork
-from .replay_buffer import ReplayMemory
+from coordinate_network import CoordinateCoverageNetwork
+from replay_buffer import ReplayMemory
 
 
 class CoordinateDQNAgent:

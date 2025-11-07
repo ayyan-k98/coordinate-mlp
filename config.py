@@ -8,6 +8,62 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 
 
+# ============================================================================
+# Environment Constants
+# ============================================================================
+
+# Episode settings
+MAX_EPISODE_STEPS = 500
+GRID_SIZE = 20  # Default grid size
+
+# Action space
+N_ACTIONS = 9  # 8 directions + stay
+ACTION_DELTAS = [
+    (0, 1),    # 0: N
+    (1, 1),    # 1: NE
+    (1, 0),    # 2: E
+    (1, -1),   # 3: SE
+    (0, -1),   # 4: S
+    (-1, -1),  # 5: SW
+    (-1, 0),   # 6: W
+    (-1, 1),   # 7: NW
+    (0, 0),    # 8: STAY
+]
+ACTION_NAMES = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW', 'STAY']
+
+# Sensing parameters
+NUM_RAYS = 72  # Number of rays for raycasting
+SAMPLES_PER_RAY = 20  # Samples per ray
+
+# Probabilistic environment settings
+USE_PROBABILISTIC_ENV = False  # Use probabilistic coverage model
+PROBABILISTIC_COVERAGE_MIDPOINT = 2.0  # Sigmoid midpoint for coverage probability
+PROBABILISTIC_COVERAGE_STEEPNESS = 1.5  # Sigmoid steepness
+COVERAGE_THRESHOLD = 0.9  # Threshold for considering a cell covered
+
+# Reward weights
+COVERAGE_REWARD = 1.2  # Reward per covered cell
+EXPLORATION_REWARD = 0.07  # Reward per newly sensed cell
+FRONTIER_BONUS = 0.012  # Bonus per frontier cell
+FRONTIER_CAP = 0.25  # Max frontier bonus
+COLLISION_PENALTY = -0.25  # Penalty for collision
+STEP_PENALTY = -0.0012  # Small penalty per step
+STAY_PENALTY = -0.012  # Penalty for staying in place
+
+# Rotation penalty settings
+USE_ROTATION_PENALTY = True  # Enable rotation penalty
+ROTATION_PENALTY_SMALL = -0.05  # ≤45°
+ROTATION_PENALTY_MEDIUM = -0.10  # ≤90°
+ROTATION_PENALTY_LARGE = -0.15  # >90°
+
+# Early termination settings
+ENABLE_EARLY_TERMINATION = False  # Enable early termination on coverage goal
+EARLY_TERM_MIN_STEPS = 100  # Minimum steps before early termination allowed
+EARLY_TERM_COVERAGE_TARGET = 0.95  # Coverage threshold for early termination
+EARLY_TERM_COMPLETION_BONUS = 10.0  # Bonus for completing coverage goal
+EARLY_TERM_TIME_BONUS_PER_STEP = 0.01  # Bonus per step saved
+
+
 @dataclass
 class ModelConfig:
     """Configuration for the Coordinate MLP model."""

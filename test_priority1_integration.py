@@ -12,7 +12,7 @@ Verifies they integrate seamlessly and provide cumulative benefits.
 import numpy as np
 import torch
 import time
-from src.agent.dqn_agent import CoordinateDQNAgent
+from dqn_agent import CoordinateDQNAgent
 
 
 def create_dummy_state(H: int, W: int, channels: int = 5) -> np.ndarray:

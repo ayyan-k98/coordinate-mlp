@@ -10,7 +10,7 @@ import os
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.agent.dqn_agent import CoordinateDQNAgent
+from dqn_agent import CoordinateDQNAgent
 
 
 def test_visibility_mask():

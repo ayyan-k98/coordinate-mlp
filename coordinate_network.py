@@ -9,10 +9,10 @@ import torch
 import torch.nn as nn
 from typing import Optional, Tuple
 
-from .positional_encoding import FourierPositionalEncoding, generate_normalized_coords
-from .cell_encoder import CellFeatureMLP
-from .attention import AttentionPooling, LocalAttentionPooling
-from .q_network import DuelingQNetwork
+from positional_encoding import FourierPositionalEncoding, generate_normalized_coords
+from cell_encoder import CellFeatureMLP
+from attention import AttentionPooling, LocalAttentionPooling
+from q_network import DuelingQNetwork
 
 
 class CoordinateCoverageNetwork(nn.Module):

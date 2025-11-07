@@ -11,10 +11,10 @@ import numpy as np
 import torch
 from typing import Dict, List
 
-from src.agent.dqn_agent import CoordinateDQNAgent
-from src.config import get_default_config, ExperimentConfig
-from src.utils.metrics import CoverageMetrics, aggregate_metrics
-from src.utils.visualization import plot_grid_size_comparison
+from dqn_agent import CoordinateDQNAgent
+from config import get_default_config, ExperimentConfig
+from metrics import CoverageMetrics, aggregate_metrics
+from visualization import plot_grid_size_comparison
 
 
 def create_test_environment(grid_size: int, config: ExperimentConfig, seed: int = None):

@@ -8,7 +8,7 @@ by avoiding redundant Fourier feature computation.
 import torch
 import time
 import numpy as np
-from src.models.coordinate_network import CoordinateCoverageNetwork
+from coordinate_network import CoordinateCoverageNetwork
 
 
 def test_cache_functionality():
