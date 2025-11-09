@@ -88,8 +88,10 @@ class CoordinateCoverageNetwork(nn.Module):
             num_actions=num_actions,
             dropout=dropout
         )
-        
-        # Cache for coordinate features (to avoid recomputing)
+
+        # Pre-attention normalization to prevent FP16 overflow in softmax
+        # This stabilizes the MultiheadAttention layer for mixed precision training
+        self.pre_attention_norm = nn.LayerNorm(hidden_dim)
         self._coord_cache = {}
     
     def _get_coord_features(self, H: int, W: int, device: torch.device) -> torch.Tensor:
@@ -155,7 +157,11 @@ class CoordinateCoverageNetwork(nn.Module):
         
         # STEP 4: Per-cell feature extraction
         cell_features = self.cell_encoder(combined)  # [B, H*W, hidden_dim]
-        
+
+        # STEP 4.5: Normalize features before attention (critical for FP16 stability)
+        # Prevents softmax overflow in MultiheadAttention when using mixed precision
+        cell_features = self.pre_attention_norm(cell_features)  # [B, H*W, hidden_dim]
+
         # STEP 5: Attention-based aggregation
         if self.use_local_attention:
             # Local attention requires agent position

@@ -78,7 +78,10 @@ class CoordinateDQNAgent:
         # Mixed precision training
         self.use_mixed_precision = use_mixed_precision and self.device.type == 'cuda'
         if self.use_mixed_precision:
-            self.scaler = torch.cuda.amp.GradScaler()
+            self.scaler = torch.cuda.amp.GradScaler(
+                init_scale=2.**10,  # Start with smaller scale (default is 2^16)
+                growth_interval=2000  # Grow scale less frequently
+            )
             print("  Mixed Precision (AMP): Enabled")
         else:
             self.scaler = None
@@ -125,9 +128,16 @@ class CoordinateDQNAgent:
             lr=learning_rate
         )
         
-        # Replay buffer
-        self.memory = ReplayMemory(capacity=memory_capacity)
-        
+        # Replay buffers - separate buffer for each grid size
+        # This allows multi-scale training without shape mismatch errors
+        self.memories = {
+            15: ReplayMemory(capacity=memory_capacity // 4),
+            20: ReplayMemory(capacity=memory_capacity // 4),
+            25: ReplayMemory(capacity=memory_capacity // 4),
+            30: ReplayMemory(capacity=memory_capacity // 4),
+        }
+        # For backward compatibility with code that accesses self.memory
+        self.memory = self.memories[20]  # Default to 20x20
         # Training stats
         self.training_steps = 0
         self.episodes = 0
@@ -193,6 +203,20 @@ class CoordinateDQNAgent:
         
         return action
     
+    def store_transition(self, state, action, reward, next_state, done, grid_size: int = 20):
+        """
+        Store transition in grid-specific replay buffer.
+        
+        Args:
+            state: Current state
+            action: Action taken
+            reward: Reward received
+            next_state: Next state
+            done: Episode done flag
+            grid_size: Grid size (15, 20, 25, or 30)
+        """
+        memory = self.memories.get(grid_size, self.memories[20])
+        memory.push(state, action, reward, next_state, done)
     def _add_visibility_mask(self, state: np.ndarray, agent_pos: Tuple[int, int]) -> np.ndarray:
         """
         Add visibility mask as additional channel for POMDP.
@@ -243,21 +267,26 @@ class CoordinateDQNAgent:
         mask = (distances <= self.sensor_range).astype(np.float32)
         
         return mask
-    
-    def update(self) -> Optional[dict]:
+        
+    def update(self, grid_size: int = 20) -> Optional[dict]:
         """
         Perform one step of DQN training using Double DQN.
 
+        Args:
+            grid_size: Grid size to sample from (15, 20, 25, or 30)
+
         Returns:
             info: Dictionary with training metrics (loss, q_values, etc.)
-                  Returns None if not enough samples in memory
+                Returns None if not enough samples in memory
         """
-        if len(self.memory) < self.batch_size:
+        # Get the appropriate memory buffer for this grid size
+        memory = self.memories.get(grid_size, self.memories[20])
+        
+        if len(memory) < self.batch_size:
             return None
 
-        # Sample batch
-        states, actions, rewards, next_states, dones = self.memory.sample(self.batch_size)
-
+        # Sample batch from grid-specific buffer
+        states, actions, rewards, next_states, dones = memory.sample(self.batch_size)
         # Move to device
         states = states.to(self.device)
         actions = actions.to(self.device)
@@ -266,26 +295,26 @@ class CoordinateDQNAgent:
         dones = dones.to(self.device)
 
         if self.use_mixed_precision:
-            # Mixed precision training path (2-3x faster on modern GPUs)
-            with torch.cuda.amp.autocast():
-                # Current Q-values
-                q_values = self.policy_net(states)  # [batch, num_actions]
-                q_values = q_values.gather(1, actions)  # [batch, 1]
-
-                # Target Q-values (Double DQN)
-                with torch.no_grad():
-                    # Select best actions using policy network
+            # Compute targets in FP32 FIRST (prevents numerical instability)
+            with torch.no_grad():
+                # Forward passes can use autocast
+                with torch.cuda.amp.autocast():
                     next_q_policy = self.policy_net(next_states)
                     next_actions = next_q_policy.argmax(dim=1, keepdim=True)
-
-                    # Evaluate using target network
+                    
                     next_q_target = self.target_net(next_states)
                     next_q_values = next_q_target.gather(1, next_actions)
+                
+                # Compute Bellman targets in FP32
+                targets = rewards + self.gamma * next_q_values.float() * (1 - dones)
+                #targets = torch.clamp(targets, min=-100.0, max=100.0)
 
-                    # Bellman target
-                    targets = rewards + self.gamma * next_q_values * (1 - dones)
-
-                # Compute loss (Huber loss for robustness)
+            # Now compute Q-values and loss with autocast
+            with torch.cuda.amp.autocast():
+                q_values = self.policy_net(states)
+                q_values = q_values.gather(1, actions)
+                
+                # Loss computation
                 loss = nn.functional.smooth_l1_loss(q_values, targets)
 
             # Backward pass with gradient scaling
@@ -294,7 +323,65 @@ class CoordinateDQNAgent:
 
             # Unscale before gradient clipping
             self.scaler.unscale_(self.optimizer)
-            grad_norm = torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), max_norm=10.0)
+            
+            # ========== COMPREHENSIVE GRADIENT HEALTH CHECKS ==========
+            has_nan = False
+            has_inf = False
+            bad_layers = []
+            
+            for name, param in self.policy_net.named_parameters():
+                if param.grad is not None:
+                    if torch.isnan(param.grad).any():
+                        has_nan = True
+                        bad_layers.append(f"NaN in {name}")
+                    if torch.isinf(param.grad).any():
+                        has_inf = True
+                        bad_layers.append(f"Inf in {name}")
+            
+            if has_nan or has_inf:
+                print(f"\n{'='*70}")
+                print(f"⚠️  GRADIENT EXPLOSION DETECTED ⚠️")
+                print(f"{'='*70}")
+                print(f"Training Step: {self.training_steps}")
+                
+                # Show which layers exploded
+                print(f"\nExploded Layers ({len(bad_layers)} total):")
+                for layer_info in bad_layers[:5]:  # First 5
+                    print(f"  • {layer_info}")
+                if len(bad_layers) > 5:
+                    print(f"  ... and {len(bad_layers)-5} more")
+                
+                # Network statistics
+                print(f"\nNetwork Statistics:")
+                print(f"  Q-values: min={q_values.min().item():.2f}, max={q_values.max().item():.2f}, mean={q_values.mean().item():.2f}, std={q_values.std().item():.2f}")
+                print(f"  Targets:  min={targets.min().item():.2f}, max={targets.max().item():.2f}, mean={targets.mean().item():.2f}, std={targets.std().item():.2f}")
+                print(f"  Rewards:  min={rewards.min().item():.2f}, max={rewards.max().item():.2f}, mean={rewards.mean().item():.2f}")
+                print(f"  Loss:     {loss.item():.4f}")
+                
+                # Test for forward pass issues
+                print(f"\nForward Pass Check:")
+                with torch.no_grad():
+                    with torch.cuda.amp.autocast():
+                        test_out = self.policy_net(states[:1])
+                    if torch.isnan(test_out).any():
+                        print(f"  ⚠️  NaN in network output (forward pass corruption!)")
+                    elif torch.isinf(test_out).any():
+                        print(f"  ⚠️  Inf in network output (activation overflow!)")
+                    else:
+                        print(f"  ✓  Forward pass output is finite")
+                        print(f"     Output range: [{test_out.min().item():.2f}, {test_out.max().item():.2f}]")
+                
+                print(f"{'='*70}\n")
+                
+                for param in self.policy_net.parameters():
+                    if param.grad is not None:
+                        param.grad.zero_()
+                # Reset and skip this update
+                self.scaler.update()
+                return None
+            
+            # Gradient clipping (only if healthy)
+            grad_norm = torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), max_norm=5.0)
 
             # Optimizer step with scaling
             self.scaler.step(self.optimizer)
@@ -371,36 +458,32 @@ class CoordinateDQNAgent:
         self.epsilon = max(self.epsilon_end, self.epsilon * self.epsilon_decay)
     
     def save(self, path: str):
-        """
-        Save agent state to file.
+        """Save agent state to file."""
+        # Save all replay buffers
+        memory_states = {size: list(mem.memory) for size, mem in self.memories.items()}
         
-        Args:
-            path: Path to save checkpoint
-        """
         torch.save({
-            'policy_net_state_dict': self.policy_net.state_dict(),
-            'target_net_state_dict': self.target_net.state_dict(),
-            'optimizer_state_dict': self.optimizer.state_dict(),
+            'policy_net': self.policy_net.state_dict(),
+            'target_net': self.target_net.state_dict(),
+            'optimizer': self.optimizer.state_dict(),
             'epsilon': self.epsilon,
             'training_steps': self.training_steps,
-            'episodes': self.episodes,
+            'memories': memory_states,  # Save all buffers
         }, path)
     
     def load(self, path: str):
-        """
-        Load agent state from file.
-        
-        Args:
-            path: Path to checkpoint
-        """
+        """Load agent state from file."""
         checkpoint = torch.load(path, map_location=self.device)
-        self.policy_net.load_state_dict(checkpoint['policy_net_state_dict'])
-        self.target_net.load_state_dict(checkpoint['target_net_state_dict'])
-        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        self.policy_net.load_state_dict(checkpoint['policy_net'])
+        self.target_net.load_state_dict(checkpoint['target_net'])
+        self.optimizer.load_state_dict(checkpoint['optimizer'])
         self.epsilon = checkpoint['epsilon']
-        self.training_steps = checkpoint['training_steps']
-        self.episodes = checkpoint['episodes']
-
+        self.training_steps = checkpoint.get('training_steps', 0)
+        
+        # Load all replay buffers if available
+        if 'memories' in checkpoint:
+            for size, memory_list in checkpoint['memories'].items():
+                self.memories[size].memory = deque(memory_list, maxlen=self.memories[size].capacity)
 
 if __name__ == "__main__":
     # Unit test

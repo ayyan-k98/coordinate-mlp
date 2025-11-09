@@ -567,7 +567,7 @@ class RewardFunction:
         breakdown['collision'] = collision_r
         
         # 6. Frontier bonus (moved from 5)
-        if (agent.y, agent.x) in next_state.frontiers:
+        if (agent.y, agent.x) in state.frontiers:
             frontier_r = self.frontier_bonus
         else:
             frontier_r = 0.0
