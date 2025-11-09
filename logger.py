@@ -72,8 +72,14 @@ class Logger:
         # Log to file
         self.log(metrics, step=episode)
         
-        # Log to console
-        metric_str = ', '.join([f"{k}={v:.4f}" for k, v in metrics.items()])
+        # Log to console with type-aware formatting
+        metric_parts = []
+        for k, v in metrics.items():
+            if isinstance(v, (int, float)):
+                metric_parts.append(f"{k}={v:.4f}")
+            else:
+                metric_parts.append(f"{k}={v}")
+        metric_str = ', '.join(metric_parts)
         print(f"Episode {episode:4d}: {metric_str}")
     
     def save_summary(self, filepath: Optional[str] = None):

@@ -126,20 +126,25 @@ def evaluate_agent(
                 
                 while not done:
                     # Greedy action selection (no exploration)
-                    action = agent.select_action(state, epsilon=0.0)
+                    agent_pos = (env.state.agents[0].y, env.state.agents[0].x)
+                    action = agent.select_action(state, epsilon=0.0, agent_pos=agent_pos)
                     next_state, reward, done, info = env.step(action)
                     state = next_state
                     episode_reward += reward
                     episode_steps += 1
                 
-                # Store metrics
+                # Calculate cells-per-step efficiency
+                total_cells = grid_size * grid_size
+                cells_covered = info['coverage_pct'] * total_cells
+                efficiency = cells_covered / episode_steps if episode_steps > 0 else 0
+
                 result = {
                     'grid_size': grid_size,
                     'map_type': map_type,
                     'coverage': info['coverage_pct'],
                     'reward': episode_reward,
                     'steps': episode_steps,
-                    'efficiency': info['coverage_pct'] / episode_steps if episode_steps > 0 else 0,
+                    'efficiency': efficiency,  # Cells per step
                     'collisions': info.get('collisions', 0)
                 }
                 
@@ -232,24 +237,38 @@ def train_episode(
     while not done:
         # Select action
         valid_actions = env.get_valid_actions()
-        action = agent.select_action(state, valid_actions=valid_actions)
+        
+        # Get current agent position for POMDP
+        agent_pos = (env.state.agents[0].y, env.state.agents[0].x)
+        
+        action = agent.select_action(state, valid_actions=valid_actions, agent_pos=agent_pos)
         
         # Take step
         next_state, reward, done, info = env.step(action)
         
-        # Store transition
-        agent.memory.push(state, action, reward, next_state, done)
+        # Get next agent position (after step)
+        next_agent_pos = (env.state.agents[0].y, env.state.agents[0].x)
         
+        # Store transition with visibility masks if POMDP
+        # Use grid-specific replay buffer
+        grid_size = env.grid_size
+        if agent.use_pomdp:
+            state_with_mask = agent._add_visibility_mask(state, agent_pos)
+            next_state_with_mask = agent._add_visibility_mask(next_state, next_agent_pos)
+            agent.store_transition(state_with_mask, action, reward, next_state_with_mask, done, grid_size)
+        else:
+            agent.store_transition(state, action, reward, next_state, done, grid_size)
         # Update agent (after warmup)
+        # Pass grid_size to sample from correct buffer
         if episode >= config.training.warmup_episodes:
-            update_info = agent.update()
+            update_info = agent.update(grid_size=grid_size)
             if update_info:
                 losses.append(update_info['loss'])
                 q_values_list.append(update_info['q_mean'])
                 td_errors_list.append(update_info['td_error_mean'])
                 grad_norms_list.append(update_info['grad_norm'])
         
-        state = next_state
+        state = next_state  # Keep raw state for next iteration
         episode_reward += reward
         episode_steps += 1
     
@@ -261,8 +280,10 @@ def train_episode(
     steps_per_second = episode_steps / episode_time if episode_time > 0 else 0.0
     
     # Compute efficiency metrics
-    efficiency = info['coverage_pct'] / episode_steps if episode_steps > 0 else 0.0
-    
+    grid_size = env.grid_size
+    total_cells = grid_size * grid_size
+    cells_covered = info['coverage_pct'] * total_cells
+    efficiency = cells_covered / episode_steps if episode_steps > 0 else 0.0
     # Compile enhanced metrics
     metrics = {
         'episode': episode,
@@ -270,7 +291,12 @@ def train_episode(
         'steps': episode_steps,
         'coverage': info['coverage_pct'],
         'epsilon': agent.epsilon,
-        'memory_size': len(agent.memory),
+        # Report total memory across all grid sizes
+        'memory_size': sum(len(mem) for mem in agent.memories.values()),
+        'memory_size_15': len(agent.memories[15]),
+        'memory_size_20': len(agent.memories[20]),
+        'memory_size_25': len(agent.memories[25]),
+        'memory_size_30': len(agent.memories[30]),
         # Performance metrics
         'episode_time': episode_time,
         'steps_per_second': steps_per_second,
@@ -322,15 +348,22 @@ def train(config: ExperimentConfig, curriculum_type: str = 'default'):
     os.makedirs(config.checkpoint_dir, exist_ok=True)
 
     # Setup performance optimizations
+    # Setup performance optimizations
     device = torch.device(config.training.device if torch.cuda.is_available() else 'cpu')
+
+    # AMP toggle for debugging gradient explosions
+    USE_AMP = True  # Set to False to test FP32-only training
+
     perf_config = PerformanceConfig(
-        use_amp=True,  # Mixed precision training (2-3x speedup)
-        compile_model=hasattr(torch, 'compile'),  # PyTorch 2.0+ compilation
-        use_cudnn_benchmark=True,  # Faster convolutions
-        use_tf32=True,  # TF32 for Ampere GPUs
+        use_amp=USE_AMP,  # Can disable for debugging
+        compile_model=hasattr(torch, 'compile'),
+        use_cudnn_benchmark=True,
+        use_tf32=True,
     )
     setup_performance_optimizations(perf_config, device)
 
+    if not USE_AMP:
+        print("⚠️  Mixed Precision (AMP) DISABLED - Using FP32 only")
     # Initialize mixed precision trainer
     mp_trainer = MixedPrecisionTrainer(enabled=perf_config.use_amp, device=device)
 
@@ -355,8 +388,10 @@ def train(config: ExperimentConfig, curriculum_type: str = 'default'):
 
     # Create agent (with mixed precision enabled)
     agent = CoordinateDQNAgent(
-        input_channels=config.model.input_channels,
+        input_channels=6,  # 6 input channels for coordinate MLP
         num_actions=config.model.num_actions,
+        use_pomdp=True,
+        sensor_range=4.0,
         hidden_dim=config.model.hidden_dim,
         num_freq_bands=config.model.num_freq_bands,
         learning_rate=config.training.learning_rate,
@@ -387,12 +422,14 @@ def train(config: ExperimentConfig, curriculum_type: str = 'default'):
     print("-"*70)
     
     best_coverage = 0.0
+    # Track grid size changes
     
     for episode in range(config.training.num_episodes):
         # Sample from curriculum (grid size + map type)
         grid_size = curriculum.sample_grid_size()
         map_type = curriculum.sample_map_type()
 
+        
         # Create environment with curriculum map type
         env = create_environment(grid_size, config, map_type=map_type)
         
