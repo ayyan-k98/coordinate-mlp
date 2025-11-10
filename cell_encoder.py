@@ -31,18 +31,19 @@ class CellFeatureMLP(nn.Module):
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
         
-        # Three-layer MLP with ReLU activations and dropout
+        # Three-layer MLP with stable ordering: Linear → LayerNorm → ReLU → Dropout
+        # This order prevents gradient explosions in mixed precision training
         self.network = nn.Sequential(
             nn.Linear(input_dim, hidden_dim * 2),
+            nn.LayerNorm(hidden_dim * 2),  # Normalize BEFORE activation
             nn.ReLU(inplace=True),
             nn.Dropout(dropout),
-            nn.LayerNorm(hidden_dim * 2),  # Add layer norm for stability
-            
+
             nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.LayerNorm(hidden_dim),  # Normalize BEFORE activation
             nn.ReLU(inplace=True),
             nn.Dropout(dropout),
-            nn.LayerNorm(hidden_dim),
-            
+
             nn.Linear(hidden_dim, hidden_dim),
         )
         

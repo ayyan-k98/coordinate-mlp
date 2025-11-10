@@ -34,25 +34,27 @@ class DuelingQNetwork(nn.Module):
         self.hidden_dim = hidden_dim
         self.num_actions = num_actions
         
-        # Shared layers
+        # Shared layers - stable ordering: Linear → LayerNorm → ReLU → Dropout
         self.shared = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),  # Normalize BEFORE activation
             nn.ReLU(inplace=True),
-            nn.Dropout(dropout),
-            nn.LayerNorm(hidden_dim)
+            nn.Dropout(dropout)
         )
-        
-        # Value stream (scalar output)
+
+        # Value stream (scalar output) - stable ordering
         self.value_stream = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.LayerNorm(hidden_dim // 2),  # Normalize BEFORE activation
             nn.ReLU(inplace=True),
             nn.Dropout(dropout),
             nn.Linear(hidden_dim // 2, 1)  # V(s)
         )
-        
-        # Advantage stream (per-action output)
+
+        # Advantage stream (per-action output) - stable ordering
         self.advantage_stream = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.LayerNorm(hidden_dim // 2),  # Normalize BEFORE activation
             nn.ReLU(inplace=True),
             nn.Dropout(dropout),
             nn.Linear(hidden_dim // 2, num_actions)  # A(s, a)
