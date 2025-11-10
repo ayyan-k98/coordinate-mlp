@@ -383,8 +383,19 @@ class CoordinateDQNAgent:
                 self.scaler.update()
                 return None
             
-            # Gradient clipping (tighter to prevent explosions)
-            grad_norm = torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), max_norm=1.0)
+            # Gradient clipping (FCN-level conservative: 5× tighter than 1.0)
+            grad_norm = torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), max_norm=0.2)
+
+            # Adaptive Gradient Clipping (AGC) - normalizes gradients by parameter norms
+            agc_clip_factor = 0.01  # FCN-level conservative clipping
+            for param in self.policy_net.parameters():
+                if param.grad is not None:
+                    param_norm = param.data.norm(2)
+                    grad_norm_param = param.grad.data.norm(2)
+                    if param_norm > 0 and grad_norm_param > 0:
+                        max_grad_norm = agc_clip_factor * param_norm
+                        if grad_norm_param > max_grad_norm:
+                            param.grad.data.mul_(max_grad_norm / grad_norm_param)
 
             # Optimizer step with scaling
             self.scaler.step(self.optimizer)
@@ -416,8 +427,19 @@ class CoordinateDQNAgent:
             self.optimizer.zero_grad()
             loss.backward()
 
-            # Gradient clipping (tighter to prevent explosions)
-            grad_norm = torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), max_norm=1.0)
+            # Gradient clipping (FCN-level conservative: 5× tighter than 1.0)
+            grad_norm = torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), max_norm=0.2)
+
+            # Adaptive Gradient Clipping (AGC) - normalizes gradients by parameter norms
+            agc_clip_factor = 0.01  # FCN-level conservative clipping
+            for param in self.policy_net.parameters():
+                if param.grad is not None:
+                    param_norm = param.data.norm(2)
+                    grad_norm_param = param.grad.data.norm(2)
+                    if param_norm > 0 and grad_norm_param > 0:
+                        max_grad_norm = agc_clip_factor * param_norm
+                        if grad_norm_param > max_grad_norm:
+                            param.grad.data.mul_(max_grad_norm / grad_norm_param)
 
             self.optimizer.step()
 

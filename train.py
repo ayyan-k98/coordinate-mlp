@@ -267,7 +267,16 @@ def train_episode(
                 q_values_list.append(update_info['q_mean'])
                 td_errors_list.append(update_info['td_error_mean'])
                 grad_norms_list.append(update_info['grad_norm'])
-        
+
+                # Explosion detection (FCN-level threshold)
+                if update_info['grad_norm'] > 25.0:
+                    print(f"\n⚠️  GRADIENT EXPLOSION DETECTED at step {episode_steps}")
+                    print(f"   Gradient norm: {update_info['grad_norm']:.2f} (threshold: 25.0)")
+                    print(f"   Q-values: mean={update_info['q_mean']:.2f}, max={update_info['q_max']:.2f}")
+                    print(f"   Stopping episode early to prevent training collapse\n")
+                    # Mark explosion and break episode
+                    done = True
+
         state = next_state  # Keep raw state for next iteration
         episode_reward += reward
         episode_steps += 1

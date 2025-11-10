@@ -78,7 +78,7 @@ class ModelConfig:
 @dataclass
 class TrainingConfig:
     """Configuration for DQN training."""
-    learning_rate: float = 3e-5  # Reduced from 1e-4 to prevent Q-value explosion
+    learning_rate: float = 5e-6  # FCN-level conservative rate (6× slower than 3e-5) for maximum stability
     gamma: float = 0.99
     # FIXED: Slower epsilon decay to maintain exploration throughout training
     epsilon_start: float = 1.0
@@ -117,7 +117,7 @@ class EnvironmentConfig:
     revisit_penalty: float = -0.08  # Penalty for revisiting (strong enough to discourage loops)
     collision_penalty: float = -0.3  # Penalty for collision (needs to be noticeable)
     step_penalty: float = -0.0004  # Small step penalty (encourages efficiency)
-    frontier_bonus: float = 0.4  # Bonus for frontier exploration (strong positive signal)
+    frontier_bonus: float = 0.01  # Reduced to FCN-level conservative value (40× smaller) to prevent reward imbalance
     coverage_confidence_weight: float = 0.03  # Weight for coverage confidence
     first_visit_bonus: float = 0.5  # NEW: Large bonus for discovering new cells (primary exploration signal)
 
