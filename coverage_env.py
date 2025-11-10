@@ -566,11 +566,24 @@ class RewardFunction:
             collision_r = 0.0
         breakdown['collision'] = collision_r
         
-        # 6. Frontier bonus (moved from 5)
-        if (agent.y, agent.x) in state.frontiers:
-            frontier_r = self.frontier_bonus
-        else:
-            frontier_r = 0.0
+        # 6. Frontier bonus
+        # Give bonus if the agent moved to a cell that has unvisited neighbors
+        # (i.e., the agent is exploring towards the frontier)
+        # Check if the current position has any unvisited, non-obstacle neighbors
+        frontier_r = 0.0
+        if not state.visited[agent.y, agent.x]:  # Only for newly visited cells
+            H, W = state.visited.shape
+            neighbor_offsets = [
+                (-1, -1), (-1, 0), (-1, 1),
+                (0, -1),           (0, 1),
+                (1, -1),  (1, 0),  (1, 1)
+            ]
+            for dy, dx in neighbor_offsets:
+                ny, nx = agent.y + dy, agent.x + dx
+                if (0 <= ny < H and 0 <= nx < W and 
+                    not state.visited[ny, nx] and not state.obstacles[ny, nx]):
+                    frontier_r = self.frontier_bonus
+                    break
         breakdown['frontier'] = frontier_r
         
         # 7. STAY penalty (encourages movement)

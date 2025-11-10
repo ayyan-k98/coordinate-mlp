@@ -76,12 +76,19 @@ class CoordinateCoverageNetwork(nn.Module):
                 window_radius=attention_window_radius,
                 dropout=dropout
             )
+            # Also create global attention as fallback for batch training
+            self.global_attention_pool = AttentionPooling(
+                hidden_dim=hidden_dim,
+                num_heads=num_attention_heads,
+                dropout=dropout
+            )
         else:
             self.attention_pool = AttentionPooling(
                 hidden_dim=hidden_dim,
                 num_heads=num_attention_heads,
                 dropout=dropout
             )
+            self.global_attention_pool = None
         
         self.q_head = DuelingQNetwork(
             hidden_dim=hidden_dim,
@@ -163,11 +170,8 @@ class CoordinateCoverageNetwork(nn.Module):
         cell_features = self.pre_attention_norm(cell_features)  # [B, H*W, hidden_dim]
 
         # STEP 5: Attention-based aggregation
-        if self.use_local_attention:
-            # Local attention requires agent position
-            if agent_pos is None:
-                raise ValueError("agent_pos is required when use_local_attention=True")
-            
+        if self.use_local_attention and agent_pos is not None:
+            # Local attention (when agent position is provided)
             if return_attention:
                 aggregated, attention_weights = self.attention_pool(
                     cell_features,
@@ -182,8 +186,18 @@ class CoordinateCoverageNetwork(nn.Module):
                     grid_shape=(H, W)
                 )
                 attention_weights = None
+        elif self.use_local_attention and agent_pos is None:
+            # Special case: Local attention enabled but no agent_pos provided
+            # This happens during batch training. Fall back to global attention.
+            if return_attention:
+                aggregated, attention_weights = self.global_attention_pool(
+                    cell_features, return_attention_weights=True
+                )
+            else:
+                aggregated = self.global_attention_pool(cell_features)
+                attention_weights = None
         else:
-            # Global attention
+            # Global attention (default)
             if return_attention:
                 aggregated, attention_weights = self.attention_pool(
                     cell_features, return_attention_weights=True

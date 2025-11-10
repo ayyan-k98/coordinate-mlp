@@ -42,9 +42,9 @@ class CoordinateDQNAgent:
         memory_capacity: int = 50000,
         target_update_tau: float = 0.01,
         device: str = 'cuda' if torch.cuda.is_available() else 'cpu',
-        sensor_range: Optional[float] = None,
-        use_pomdp: bool = False,
-        use_local_attention: bool = False,
+        sensor_range: Optional[float] = 4.0,
+        use_pomdp: bool = True,
+        use_local_attention: bool = True,
         attention_window_radius: int = 7,
         use_mixed_precision: bool = True
     ):
@@ -298,11 +298,12 @@ class CoordinateDQNAgent:
             # Compute targets in FP32 FIRST (prevents numerical instability)
             with torch.no_grad():
                 # Forward passes can use autocast
+                # NOTE: Don't pass agent_pos during batch training (use global attention)
                 with torch.cuda.amp.autocast():
-                    next_q_policy = self.policy_net(next_states)
+                    next_q_policy = self.policy_net(next_states, agent_pos=None)
                     next_actions = next_q_policy.argmax(dim=1, keepdim=True)
                     
-                    next_q_target = self.target_net(next_states)
+                    next_q_target = self.target_net(next_states, agent_pos=None)
                     next_q_values = next_q_target.gather(1, next_actions)
                 
                 # Compute Bellman targets in FP32
@@ -358,7 +359,7 @@ class CoordinateDQNAgent:
                 print(f"  Rewards:  min={rewards.min().item():.2f}, max={rewards.max().item():.2f}, mean={rewards.mean().item():.2f}")
                 print(f"  Loss:     {loss.item():.4f}")
                 
-                # Test for forward pass issues
+                # Test for forward pass issues (use same AMP context as training)
                 print(f"\nForward Pass Check:")
                 with torch.no_grad():
                     with torch.cuda.amp.autocast():
@@ -413,8 +414,8 @@ class CoordinateDQNAgent:
             self.optimizer.zero_grad()
             loss.backward()
 
-            # Gradient clipping
-            grad_norm = torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), max_norm=10.0)
+            # Gradient clipping (consistent with mixed precision path)
+            grad_norm = torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), max_norm=5.0)
 
             self.optimizer.step()
 
