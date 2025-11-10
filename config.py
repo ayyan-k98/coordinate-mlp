@@ -80,17 +80,18 @@ class TrainingConfig:
     """Configuration for DQN training."""
     learning_rate: float = 1e-4
     gamma: float = 0.99
+    # FIXED: Slower epsilon decay to maintain exploration throughout training
     epsilon_start: float = 1.0
-    epsilon_end: float = 0.05
-    epsilon_decay: float = 0.995
+    epsilon_end: float = 0.25  # Raised from 0.05 - coverage is non-stationary, needs continued exploration
+    epsilon_decay: float = 0.998  # Slowed from 0.995 - reaches minimum around episode 700 instead of 390
     batch_size: int = 32
     memory_capacity: int = 50000
     target_update_tau: float = 0.01
-    target_update_frequency: int = 1  # Update every N episodes
-    
+    target_update_frequency: int = 1  # Update every N episodes (soft update via tau)
+
     # Training schedule
     num_episodes: int = 1500
-    warmup_episodes: int = 50  # Episodes before training starts
+    warmup_episodes: int = 100  # Increased from 50 - more diverse experiences before training starts
     eval_frequency: int = 50  # Evaluate every N episodes
     save_frequency: int = 100  # Save checkpoint every N episodes
     

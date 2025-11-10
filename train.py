@@ -420,9 +420,11 @@ def train(config: ExperimentConfig, curriculum_type: str = 'default'):
     # Training loop
     print(f"\nStarting training for {config.training.num_episodes} episodes...")
     print("-"*70)
-    
+
     best_coverage = 0.0
-    # Track grid size changes
+    best_episode = 0
+    episodes_without_improvement = 0
+    patience = 200  # Early stopping: stop if no improvement for 200 episodes (disabled by default)
     
     for episode in range(config.training.num_episodes):
         # Sample from curriculum (grid size + map type)
@@ -585,13 +587,29 @@ def train(config: ExperimentConfig, curriculum_type: str = 'default'):
             # Update best model based on validation coverage
             val_coverage = eval_metrics['overall']['coverage_mean']
             if val_coverage > best_coverage:
+                improvement = (val_coverage - best_coverage) * 100 if best_coverage > 0 else val_coverage * 100
                 best_coverage = val_coverage
-                save_path = os.path.join(config.checkpoint_dir, 
+                best_episode = episode
+                episodes_without_improvement = 0
+                save_path = os.path.join(config.checkpoint_dir,
                                         f"{config.experiment_name}_best.pt")
                 agent.save(save_path)
                 print(f"✅ New best validation coverage: {best_coverage*100:.1f}% (model saved)")
+                if improvement > 0:
+                    print(f"   Improvement: +{improvement:.1f}% from previous best")
             else:
-                print(f"   Current best: {best_coverage*100:.1f}%")
+                episodes_without_improvement += config.training.eval_frequency
+                print(f"   Current best: {best_coverage*100:.1f}% (from episode {best_episode})")
+                print(f"   Episodes without improvement: {episodes_without_improvement}/{patience}")
+
+                # Early stopping check (only if enabled and past warmup)
+                if episodes_without_improvement >= patience and episode > config.training.warmup_episodes * 2:
+                    print(f"\n{'='*70}")
+                    print(f"⏹️  Early stopping triggered!")
+                    print(f"   No improvement for {episodes_without_improvement} episodes")
+                    print(f"   Best coverage: {best_coverage*100:.1f}% at episode {best_episode}")
+                    print(f"{'='*70}")
+                    break  # Exit training loop
     
     print("-"*70)
     print("Training complete!")

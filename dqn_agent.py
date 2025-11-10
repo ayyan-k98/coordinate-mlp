@@ -130,11 +130,13 @@ class CoordinateDQNAgent:
         
         # Replay buffers - separate buffer for each grid size
         # This allows multi-scale training without shape mismatch errors
+        # FIXED: Optimized buffer sizes per grid (must be >= 10× batch_size for good sampling)
+        # Larger grids need more buffer capacity due to longer episodes
         self.memories = {
-            15: ReplayMemory(capacity=memory_capacity // 4),
-            20: ReplayMemory(capacity=memory_capacity // 4),
-            25: ReplayMemory(capacity=memory_capacity // 4),
-            30: ReplayMemory(capacity=memory_capacity // 4),
+            15: ReplayMemory(capacity=2000),   # ~15 × 25 = 375 steps/episode, 2000 ≈ 5 episodes
+            20: ReplayMemory(capacity=3000),   # ~20 × 25 = 500 steps/episode, 3000 ≈ 6 episodes
+            25: ReplayMemory(capacity=4000),   # ~25 × 25 = 625 steps/episode, 4000 ≈ 6 episodes
+            30: ReplayMemory(capacity=5000),   # ~30 × 25 = 750 steps/episode, 5000 ≈ 7 episodes
         }
         # For backward compatibility with code that accesses self.memory
         self.memory = self.memories[20]  # Default to 20x20
