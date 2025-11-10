@@ -341,15 +341,16 @@ class RewardFunction:
     
     def __init__(
         self,
-        coverage_reward: float = 0.2,  # 10× scaled: ~68 per episode (was 0.02)
-        revisit_penalty: float = -0.5,  # 10× scaled: meaningful penalty (was -0.05)
-        collision_penalty: float = -5.0,  # 10× scaled: strong deterrent (was -0.5)
-        step_penalty: float = -0.05,  # 10× scaled: efficiency pressure (was -0.005)
-        frontier_bonus: float = 0.5,  # 10× scaled: exploration bonus (was 0.05)
-        coverage_confidence_weight: float = 0.1,  # 10× scaled: confidence weight (was 0.01)
+        coverage_reward: float = 0.5,  # 5× scaled: balanced reward (was 2.0)
+        revisit_penalty: float = -0.08,  # 5× scaled: strong enough to discourage loops
+        collision_penalty: float = -0.3,  # 5× scaled: noticeable penalty
+        step_penalty: float = -0.0004,  # 5× scaled: efficiency pressure
+        frontier_bonus: float = 0.4,  # Strong positive signal for frontier exploration
+        coverage_confidence_weight: float = 0.03,  # 5× scaled: confidence weight
+        first_visit_bonus: float = 0.5,  # NEW: Large bonus for discovering new cells
         use_rotation_penalty: bool = True,
         rotation_penalty_small: float = -0.1,  # ≤45° 10× scaled (was -0.01)
-        rotation_penalty_medium: float = -0.2,  # ≤90° 10× scaled (was -0.02)
+        rotation_penalty_medium: float = -0.2,  # ≤90× 10× scaled (was -0.02)
         rotation_penalty_large: float = -0.5,  # >90° 10× scaled (was -0.05)
         stay_penalty: float = -1.0,  # 10× scaled: movement incentive (was -0.1)
         enable_early_completion: bool = True,  # Enable early completion bonus
@@ -357,8 +358,8 @@ class RewardFunction:
         early_completion_bonus: float = 20.0,  # 10× scaled: base bonus (was 2.0)
         time_bonus_per_step_saved: float = 0.1,  # 10× scaled: time bonus (was 0.01)
         use_progressive_revisit_penalty: bool = True,  # Progressive penalty scaling
-        revisit_penalty_min: float = -0.1,  # Initial revisit penalty (lenient early on)
-        revisit_penalty_max: float = -0.5,  # Final revisit penalty (strict later)
+        revisit_penalty_min: float = -0.03,  # Initial revisit penalty (lenient early on)
+        revisit_penalty_max: float = -0.08,  # Final revisit penalty (strong enough)
         max_steps: int = 500  # Maximum steps per episode (for calculating progress ratio)
     ):
         """
@@ -369,6 +370,7 @@ class RewardFunction:
             step_penalty: Small penalty per step (encourages efficiency)
             frontier_bonus: Bonus for moving to frontier cell
             coverage_confidence_weight: How much to weight coverage confidence
+            first_visit_bonus: Large bonus for visiting a new cell for the first time
             use_rotation_penalty: Enable rotation penalty
             rotation_penalty_small: Penalty for small rotations (≤45°)
             rotation_penalty_medium: Penalty for medium rotations (≤90°)
@@ -389,6 +391,7 @@ class RewardFunction:
         self.step_penalty = step_penalty
         self.frontier_bonus = frontier_bonus
         self.confidence_weight = coverage_confidence_weight
+        self.first_visit_bonus = first_visit_bonus
 
         # Rotation penalty
         self.use_rotation_penalty = use_rotation_penalty
@@ -546,7 +549,15 @@ class RewardFunction:
         confidence_r = confidence_gain * self.confidence_weight
         breakdown['confidence'] = confidence_r
 
-        # 3. Revisit penalty (progressive: scales from lenient to strict)
+        # 3. First visit bonus (CRITICAL: strong positive signal for exploration)
+        # This is the PRIMARY exploration reward - agent gets large bonus for discovering new cells
+        if not is_revisit:
+            first_visit_r = self.first_visit_bonus
+        else:
+            first_visit_r = 0.0
+        breakdown['first_visit'] = first_visit_r
+
+        # 4. Revisit penalty (progressive: scales from lenient to strict)
         if is_revisit:
             if self.use_progressive_revisit:
                 # Calculate progress ratio (0.0 at start, 1.0 at max_steps)
@@ -562,24 +573,24 @@ class RewardFunction:
             revisit_r = 0.0
         breakdown['revisit'] = revisit_r
 
-        # 4. Rotation penalty
+        # 5. Rotation penalty
         rotation_r = self._compute_rotation_penalty(last_action, int(action))
         breakdown['rotation'] = rotation_r
 
-        # 5. Collision penalty
+        # 6. Collision penalty
         collision_r = self.collision_penalty if is_collision else 0.0
         breakdown['collision'] = collision_r
 
-        # 6. Frontier bonus - reward expanding exploration
+        # 7. Frontier bonus - reward expanding exploration
         # Uses pre-computed flag to avoid shallow copy bug
         frontier_r = self.frontier_bonus if is_on_frontier else 0.0
         breakdown['frontier'] = frontier_r
 
-        # 7. STAY penalty (encourages movement)
+        # 8. STAY penalty (encourages movement)
         stay_r = self.stay_penalty if int(action) == Action.STAY else 0.0
         breakdown['stay'] = stay_r
 
-        # 8. Step penalty (encourages efficiency)
+        # 9. Step penalty (encourages efficiency)
         breakdown['step'] = self.step_penalty
 
         # Total reward

@@ -383,8 +383,8 @@ class CoordinateDQNAgent:
                 self.scaler.update()
                 return None
             
-            # Gradient clipping (only if healthy)
-            grad_norm = torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), max_norm=5.0)
+            # Gradient clipping (tighter to prevent explosions)
+            grad_norm = torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), max_norm=1.0)
 
             # Optimizer step with scaling
             self.scaler.step(self.optimizer)
@@ -416,8 +416,8 @@ class CoordinateDQNAgent:
             self.optimizer.zero_grad()
             loss.backward()
 
-            # Gradient clipping (consistent with mixed precision path)
-            grad_norm = torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), max_norm=5.0)
+            # Gradient clipping (tighter to prevent explosions)
+            grad_norm = torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), max_norm=1.0)
 
             self.optimizer.step()
 

@@ -78,7 +78,7 @@ class ModelConfig:
 @dataclass
 class TrainingConfig:
     """Configuration for DQN training."""
-    learning_rate: float = 1e-4
+    learning_rate: float = 3e-5  # Reduced from 1e-4 to prevent Q-value explosion
     gamma: float = 0.99
     # FIXED: Slower epsilon decay to maintain exploration throughout training
     epsilon_start: float = 1.0
@@ -112,19 +112,20 @@ class EnvironmentConfig:
     obstacle_density: float = 0.15  # Fraction of cells that are obstacles
 
     # Reward configuration (matches coverage_env.py RewardFunction)
-    # SCALED DOWN 10× to prevent gradient explosion and improve training stability
-    coverage_reward: float = 0.2  # Reward for new coverage (was 2.0)
-    revisit_penalty: float = -0.03  # Penalty for revisiting (was -0.3)
-    collision_penalty: float = -0.1  # Penalty for collision (was -1.0)
-    step_penalty: float = -0.0002  # Small step penalty (was -0.002)
-    frontier_bonus: float = 0.2  # Bonus for frontier exploration (was 0.4)
-    coverage_confidence_weight: float = 0.01  # Weight for coverage confidence (was 0.1)
+    # BALANCED REWARDS: 5× scale (not 10×) + strong first-visit bonus
+    coverage_reward: float = 0.5  # Reward for new coverage (0.01 cells × 0.5 = 0.005 visible signal)
+    revisit_penalty: float = -0.08  # Penalty for revisiting (strong enough to discourage loops)
+    collision_penalty: float = -0.3  # Penalty for collision (needs to be noticeable)
+    step_penalty: float = -0.0004  # Small step penalty (encourages efficiency)
+    frontier_bonus: float = 0.4  # Bonus for frontier exploration (strong positive signal)
+    coverage_confidence_weight: float = 0.03  # Weight for coverage confidence
+    first_visit_bonus: float = 0.5  # NEW: Large bonus for discovering new cells (primary exploration signal)
 
     # Progressive revisit penalty (scales from low to high as episode progresses)
-    # Scaled down proportionally to maintain relative strength
+    # Stronger penalties to force exploration
     use_progressive_revisit_penalty: bool = True  # Enable progressive penalty
-    revisit_penalty_min: float = -0.01  # Initial revisit penalty (was -0.1)
-    revisit_penalty_max: float = -0.03  # Final revisit penalty (was -0.3)
+    revisit_penalty_min: float = -0.03  # Initial revisit penalty (lenient at start)
+    revisit_penalty_max: float = -0.08  # Final revisit penalty (strong at end)
 
     def get_sensor_range(self, grid_size: int) -> float:
         """Get sensor range for given grid size."""
@@ -143,6 +144,7 @@ class EnvironmentConfig:
             'step_penalty': self.step_penalty,
             'frontier_bonus': self.frontier_bonus,
             'coverage_confidence_weight': self.coverage_confidence_weight,
+            'first_visit_bonus': self.first_visit_bonus,
             'use_progressive_revisit_penalty': self.use_progressive_revisit_penalty,
             'revisit_penalty_min': self.revisit_penalty_min,
             'revisit_penalty_max': self.revisit_penalty_max
