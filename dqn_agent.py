@@ -12,7 +12,7 @@ import numpy as np
 from typing import Optional, Tuple
 import random
 
-from coordinate_network import CoordinateCoverageNetwork
+from fcn_network import FCNCoverageNetwork
 from replay_buffer import ReplayMemory
 
 
@@ -100,22 +100,20 @@ class CoordinateDQNAgent:
         self.epsilon_decay = epsilon_decay
         
         # Networks
-        self.policy_net = CoordinateCoverageNetwork(
+        self.policy_net = FCNCoverageNetwork(
             input_channels=input_channels,
-            num_freq_bands=num_freq_bands,
-            hidden_dim=hidden_dim,
+            hidden_channels=[64, 128, 256],
             num_actions=num_actions,
-            use_local_attention=use_local_attention,
-            attention_window_radius=attention_window_radius
+            dropout=0.1,
+            spatial_softmax_temperature=1.0
         ).to(self.device)
-        
-        self.target_net = CoordinateCoverageNetwork(
+
+        self.target_net = FCNCoverageNetwork(
             input_channels=input_channels,
-            num_freq_bands=num_freq_bands,
-            hidden_dim=hidden_dim,
+            hidden_channels=[64, 128, 256],
             num_actions=num_actions,
-            use_local_attention=use_local_attention,
-            attention_window_radius=attention_window_radius
+            dropout=0.1,
+            spatial_softmax_temperature=1.0
         ).to(self.device)
         
         # Copy policy network weights to target network
@@ -189,14 +187,9 @@ class CoordinateDQNAgent:
             
             # Convert state to tensor
             state_tensor = torch.FloatTensor(state_with_mask).unsqueeze(0).to(self.device)
-            
-            # Forward pass
-            if self.use_local_attention:
-                if agent_pos is None:
-                    raise ValueError("agent_pos is required when use_local_attention=True")
-                q_values = self.policy_net(state_tensor, agent_pos=agent_pos).squeeze(0).cpu().numpy()
-            else:
-                q_values = self.policy_net(state_tensor).squeeze(0).cpu().numpy()  # [num_actions]
+
+            # Forward pass (FCN doesn't need agent_pos)
+            q_values = self.policy_net(state_tensor).squeeze(0).cpu().numpy()  # [num_actions]
             
             # Mask invalid actions
             masked_q = np.full(self.num_actions, -np.inf)
@@ -300,12 +293,12 @@ class CoordinateDQNAgent:
             # Compute targets in FP32 FIRST (prevents numerical instability)
             with torch.no_grad():
                 # Forward passes can use autocast
-                # NOTE: Don't pass agent_pos during batch training (use global attention)
+                # Double DQN: use policy network for action selection, target network for Q-values
                 with torch.cuda.amp.autocast():
-                    next_q_policy = self.policy_net(next_states, agent_pos=None)
+                    next_q_policy = self.policy_net(next_states)
                     next_actions = next_q_policy.argmax(dim=1, keepdim=True)
-                    
-                    next_q_target = self.target_net(next_states, agent_pos=None)
+
+                    next_q_target = self.target_net(next_states)
                     next_q_values = next_q_target.gather(1, next_actions)
                 
                 # Compute Bellman targets in FP32

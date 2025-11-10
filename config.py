@@ -66,13 +66,12 @@ EARLY_TERM_TIME_BONUS_PER_STEP = 0.01  # Bonus per step saved
 
 @dataclass
 class ModelConfig:
-    """Configuration for the Coordinate MLP model."""
+    """Configuration for the FCN model."""
     input_channels: int = 5
-    num_freq_bands: int = 6
-    hidden_dim: int = 256
+    hidden_channels: List[int] = field(default_factory=lambda: [64, 128, 256])
     num_actions: int = 9
-    num_attention_heads: int = 4
     dropout: float = 0.1
+    spatial_softmax_temperature: float = 1.0
 
 
 @dataclass
