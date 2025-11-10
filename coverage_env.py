@@ -474,36 +474,118 @@ class RewardFunction:
     ) -> float:
         """
         Compute bonus for completing coverage early.
-        
+
         Rewards agents that:
         1. Reach high coverage (>= threshold, e.g., 95%)
         2. Complete quickly (fewer steps = higher bonus)
-        
+
         Args:
             coverage_percentage: Current coverage percentage [0, 1]
             current_step: Current step number
             max_steps: Maximum allowed steps
-        
+
         Returns:
             Completion bonus (0 if not completed, or large positive if completed early)
         """
         if not self.enable_early_completion:
             return 0.0
-        
+
         # Check if coverage threshold reached
         if coverage_percentage < self.early_completion_threshold:
             return 0.0
-        
+
         # Base bonus for completing coverage
         bonus = self.early_completion_bonus
-        
+
         # Additional time bonus for steps saved
         steps_saved = max(0, max_steps - current_step)
         time_bonus = steps_saved * self.time_bonus_per_step_saved
-        
+
         total_bonus = bonus + time_bonus
 
         return total_bonus
+
+    def compute_reward_optimized(
+        self,
+        coverage_gain: float,
+        confidence_gain: float,
+        is_revisit: bool,
+        is_on_frontier: bool,
+        is_collision: bool,
+        action: Action,
+        last_action: int,
+        current_step: int
+    ) -> Tuple[float, Dict[str, float]]:
+        """
+        Optimized reward computation using pre-computed flags.
+
+        This avoids the shallow copy bug by receiving pre-computed values
+        instead of comparing states.
+
+        Args:
+            coverage_gain: Sum of new coverage added
+            confidence_gain: Sum of new confidence added
+            is_revisit: True if agent moved to already visited cell
+            is_on_frontier: True if new position has unvisited neighbors
+            is_collision: True if agent collided with obstacle
+            action: Action taken
+            last_action: Previous action (for rotation penalty)
+            current_step: Current step number
+
+        Returns:
+            total_reward: Scalar reward
+            reward_breakdown: Dictionary of reward components
+        """
+        breakdown = {}
+
+        # 1. Coverage reward (based on new coverage)
+        coverage_r = coverage_gain * self.coverage_reward
+        breakdown['coverage'] = coverage_r
+
+        # 2. Coverage confidence bonus
+        confidence_r = confidence_gain * self.confidence_weight
+        breakdown['confidence'] = confidence_r
+
+        # 3. Revisit penalty (progressive: scales from lenient to strict)
+        if is_revisit:
+            if self.use_progressive_revisit:
+                # Calculate progress ratio (0.0 at start, 1.0 at max_steps)
+                progress = min(current_step / self.max_steps, 1.0)
+                # Linear interpolation: penalty grows from min to max
+                current_penalty = self.revisit_penalty_min + (
+                    self.revisit_penalty_max - self.revisit_penalty_min
+                ) * progress
+                revisit_r = current_penalty
+            else:
+                revisit_r = self.revisit_penalty
+        else:
+            revisit_r = 0.0
+        breakdown['revisit'] = revisit_r
+
+        # 4. Rotation penalty
+        rotation_r = self._compute_rotation_penalty(last_action, int(action))
+        breakdown['rotation'] = rotation_r
+
+        # 5. Collision penalty
+        collision_r = self.collision_penalty if is_collision else 0.0
+        breakdown['collision'] = collision_r
+
+        # 6. Frontier bonus - reward expanding exploration
+        # Uses pre-computed flag to avoid shallow copy bug
+        frontier_r = self.frontier_bonus if is_on_frontier else 0.0
+        breakdown['frontier'] = frontier_r
+
+        # 7. STAY penalty (encourages movement)
+        stay_r = self.stay_penalty if int(action) == Action.STAY else 0.0
+        breakdown['stay'] = stay_r
+
+        # 8. Step penalty (encourages efficiency)
+        breakdown['step'] = self.step_penalty
+
+        # Total reward
+        total = sum(breakdown.values())
+
+        return total, breakdown
     
     def compute_reward(
         self,
@@ -918,15 +1000,44 @@ class CoverageEnvironment:
                     
                     # Mark as visited
                     visited[y, x] = True
-    
+
+    def _has_unvisited_neighbors(self, y: int, x: int) -> bool:
+        """
+        Check if position (y, x) has any unvisited neighbors.
+
+        This is used for frontier bonus computation and must be called
+        BEFORE updating the visited array to avoid the shallow copy bug.
+
+        Args:
+            y: Y coordinate
+            x: X coordinate
+
+        Returns:
+            True if position has at least one unvisited, non-obstacle neighbor
+        """
+        neighbor_offsets = [
+            (-1, -1), (-1, 0), (-1, 1),
+            (0, -1),           (0, 1),
+            (1, -1),  (1, 0),  (1, 1)
+        ]
+        H, W = self.state.visited.shape
+
+        for dy, dx in neighbor_offsets:
+            ny, nx = y + dy, x + dx
+            if (0 <= ny < H and 0 <= nx < W and
+                not self.state.visited[ny, nx] and
+                not self.state.obstacles[ny, nx]):
+                return True
+        return False
+
     def step(self, action: int, agent_id: int = 0) -> Tuple[np.ndarray, float, bool, Dict]:
         """
         Take environment step.
-        
+
         Args:
             action: Action index [0-8]
             agent_id: Which agent is acting
-        
+
         Returns:
             observation: [5, H, W] next state
             reward: Scalar reward
@@ -936,23 +1047,31 @@ class CoverageEnvironment:
         assert self.state is not None, "Must call reset() first"
         assert 0 <= action < 9, f"Invalid action: {action}"
         assert 0 <= agent_id < self.num_agents, f"Invalid agent_id: {agent_id}"
-        
-        # Save previous state for reward computation
-        prev_state = self.state.copy()
-        
+
+        # PRE-COMPUTE VALUES BEFORE STATE MODIFICATION (avoids shallow copy bug)
+        # Save coverage/confidence sums before any modifications
+        prev_coverage_sum = self.state.coverage.sum()
+        prev_confidence_sum = self.state.coverage_confidence.sum()
+
         # Get action delta
         dy, dx = ACTION_TO_DELTA[Action(action)]
-        
+
         # Get agent
         agent = self.state.agents[agent_id]
-        
+
         # Compute new position
         new_x = np.clip(agent.x + dx, 0, self.grid_size - 1)
         new_y = np.clip(agent.y + dy, 0, self.grid_size - 1)
-        
+
+        # Check frontier status BEFORE moving (critical for frontier bonus!)
+        is_on_frontier = self._has_unvisited_neighbors(new_y, new_x)
+
+        # Save last action for rotation penalty
+        last_action = self.state.last_action if self.state.last_action is not None else action
+
         # Check collision
         collision = self.state.obstacles[new_y, new_x]
-        
+
         if collision:
             # Don't move if collision
             self.episode_stats['collisions'] += 1
@@ -960,11 +1079,12 @@ class CoverageEnvironment:
             # Update agent position
             agent.x = new_x
             agent.y = new_y
-        
-        # Check revisit
-        if self.state.visited[agent.y, agent.x]:
+
+        # Check revisit BEFORE updating coverage (critical for revisit penalty!)
+        is_revisit = self.state.visited[agent.y, agent.x]
+        if is_revisit:
             self.episode_stats['revisits'] += 1
-        
+
         # Update coverage AND obstacle belief based on new position
         self._update_coverage(
             agent,
@@ -974,22 +1094,33 @@ class CoverageEnvironment:
             self.state.visited,
             self.state.obstacle_belief  # Now updates obstacle belief!
         )
-        
+
+        # Compute gains AFTER state update
+        coverage_gain = self.state.coverage.sum() - prev_coverage_sum
+        confidence_gain = self.state.coverage_confidence.sum() - prev_confidence_sum
+
         # Update frontiers
         self.state.frontiers = self.frontier_detector.detect_frontiers(
             self.state.visited,
             self.state.obstacles
         )
-        
+
         # Increment step
         self.state.step += 1
-        
+
         # Update last action for rotation penalty tracking
         self.state.last_action = action
-        
-        # Compute reward
-        reward, reward_breakdown = self.reward_fn.compute_reward(
-            prev_state, self.state, Action(action), agent_id
+
+        # Compute reward using OPTIMIZED function with pre-computed flags
+        reward, reward_breakdown = self.reward_fn.compute_reward_optimized(
+            coverage_gain=coverage_gain,
+            confidence_gain=confidence_gain,
+            is_revisit=is_revisit,
+            is_on_frontier=is_on_frontier,
+            is_collision=collision,
+            action=Action(action),
+            last_action=last_action,
+            current_step=self.state.step
         )
         
         # Compute coverage percentage for early completion check
