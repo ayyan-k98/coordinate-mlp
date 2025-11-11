@@ -11,6 +11,7 @@ import torch.optim as optim
 import numpy as np
 from typing import Optional, Tuple
 import random
+from collections import deque
 
 from fcn_network import FCNCoverageNetwork
 from replay_buffer import ReplayMemory
@@ -79,10 +80,12 @@ class CoordinateDQNAgent:
         self.use_mixed_precision = use_mixed_precision and self.device.type == 'cuda'
         if self.use_mixed_precision:
             self.scaler = torch.cuda.amp.GradScaler(
-                init_scale=2.**10,  # Start with smaller scale (default is 2^16)
-                growth_interval=2000  # Grow scale less frequently
+                init_scale=2.**8,   # REDUCED: More conservative for large rewards (was 2^10)
+                growth_interval=5000,  # INCREASED: Grow scale even less frequently
+                backoff_factor=0.25,  # REDUCED: More aggressive backoff on overflow (default 0.5)
+                growth_factor=1.5  # REDUCED: Slower growth (default 2.0)
             )
-            print("  Mixed Precision (AMP): Enabled")
+            print("  Mixed Precision (AMP): Enabled (FCN-optimized)")
         else:
             self.scaler = None
         
@@ -188,8 +191,14 @@ class CoordinateDQNAgent:
             # Convert state to tensor
             state_tensor = torch.FloatTensor(state_with_mask).unsqueeze(0).to(self.device)
 
+            # Set to eval mode for inference (BatchNorm requires this for batch_size=1)
+            self.policy_net.eval()
+            
             # Forward pass (FCN doesn't need agent_pos)
             q_values = self.policy_net(state_tensor).squeeze(0).cpu().numpy()  # [num_actions]
+            
+            # Set back to train mode
+            self.policy_net.train()
             
             # Mask invalid actions
             masked_q = np.full(self.num_actions, -np.inf)
@@ -357,8 +366,10 @@ class CoordinateDQNAgent:
                 # Test for forward pass issues (use same AMP context as training)
                 print(f"\nForward Pass Check:")
                 with torch.no_grad():
+                    self.policy_net.eval()  # CRITICAL: Eval mode for batch_size=1
                     with torch.cuda.amp.autocast():
                         test_out = self.policy_net(states[:1])
+                    self.policy_net.train()  # Back to train mode
                     if torch.isnan(test_out).any():
                         print(f"  ⚠️  NaN in network output (forward pass corruption!)")
                     elif torch.isinf(test_out).any():
@@ -378,6 +389,11 @@ class CoordinateDQNAgent:
             
             # Gradient clipping (FCN-level conservative: 5× tighter than 1.0)
             grad_norm = torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), max_norm=0.2)
+            
+            # EXTRA: Clip biases more aggressively (they're most vulnerable to FP16 overflow)
+            for name, param in self.policy_net.named_parameters():
+                if 'bias' in name and param.grad is not None:
+                    torch.nn.utils.clip_grad_norm_([param], max_norm=0.05)  # 4× tighter for biases (FP16 safe)
 
             # Adaptive Gradient Clipping (AGC) - normalizes gradients by parameter norms
             agc_clip_factor = 0.01  # FCN-level conservative clipping
@@ -422,6 +438,11 @@ class CoordinateDQNAgent:
 
             # Gradient clipping (FCN-level conservative: 5× tighter than 1.0)
             grad_norm = torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), max_norm=0.2)
+            
+            # EXTRA: Clip biases more aggressively (they're most vulnerable to accumulation)
+            for name, param in self.policy_net.named_parameters():
+                if 'bias' in name and param.grad is not None:
+                    torch.nn.utils.clip_grad_norm_([param], max_norm=0.05)  # 4× tighter for biases
 
             # Adaptive Gradient Clipping (AGC) - normalizes gradients by parameter norms
             agc_clip_factor = 0.01  # FCN-level conservative clipping

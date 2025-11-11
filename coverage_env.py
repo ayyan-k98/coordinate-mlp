@@ -345,7 +345,7 @@ class RewardFunction:
         revisit_penalty: float = -0.08,  # 5× scaled: strong enough to discourage loops
         collision_penalty: float = -0.3,  # 5× scaled: noticeable penalty
         step_penalty: float = -0.0004,  # 5× scaled: efficiency pressure
-        frontier_bonus: float = 0.4,  # Strong positive signal for frontier exploration
+        frontier_bonus: float = 0.2,  # Meaningful guidance signal for frontier exploration
         coverage_confidence_weight: float = 0.03,  # 5× scaled: confidence weight
         first_visit_bonus: float = 0.5,  # NEW: Large bonus for discovering new cells
         use_rotation_penalty: bool = True,
@@ -355,8 +355,8 @@ class RewardFunction:
         stay_penalty: float = -1.0,  # 10× scaled: movement incentive (was -0.1)
         enable_early_completion: bool = True,  # Enable early completion bonus
         early_completion_threshold: float = 0.95,  # Coverage threshold for bonus
-        early_completion_bonus: float = 20.0,  # 10× scaled: base bonus (was 2.0)
-        time_bonus_per_step_saved: float = 0.1,  # 10× scaled: time bonus (was 0.01)
+        early_completion_bonus: float = 10.0,  # Significant bonus for early completion
+        time_bonus_per_step_saved: float = 0.005,  # Small efficiency bonus (~0.5-4.0 total)
         use_progressive_revisit_penalty: bool = True,  # Progressive penalty scaling
         revisit_penalty_min: float = -0.03,  # Initial revisit penalty (lenient early on)
         revisit_penalty_max: float = -0.08,  # Final revisit penalty (strong enough)
@@ -915,8 +915,9 @@ class CoverageEnvironment:
         obstacle_belief = np.zeros((self.grid_size, self.grid_size), dtype=float)
         
         # Initial sensing for each agent (will update obstacle_belief)
+        # NOTE: Don't mark as visited yet - only mark visited when agent MOVES to a cell
         for agent in agents:
-            self._update_coverage(agent, coverage, coverage_confidence, obstacles, visited, obstacle_belief)
+            self._initial_sensing(agent, coverage, coverage_confidence, obstacles, obstacle_belief)
         
         # Detect frontiers
         frontiers = self.frontier_detector.detect_frontiers(visited, obstacles)
@@ -946,6 +947,54 @@ class CoverageEnvironment:
         
         return self._encode_observation()
     
+    def _initial_sensing(
+        self,
+        agent: AgentState,
+        coverage: np.ndarray,
+        coverage_confidence: np.ndarray,
+        obstacles: np.ndarray,
+        obstacle_belief: np.ndarray
+    ):
+        """
+        Initial sensing at reset - updates coverage but NOT visited array.
+        
+        This allows the agent to have some initial knowledge of its surroundings
+        without marking cells as visited (so first_visit bonus still applies).
+        
+        Args:
+            agent: Agent performing the sensing
+            coverage: Coverage probability map to update
+            coverage_confidence: Confidence map to update
+            obstacles: Ground truth obstacles (for simulation)
+            obstacle_belief: Agent's belief about obstacles (UPDATED HERE)
+        """
+        # Get sensor footprint
+        cells, probs = self.sensor_model.get_sensor_footprint(
+            agent.x, agent.y, (self.grid_size, self.grid_size)
+        )
+        
+        for (y, x), prob in zip(cells, probs):
+            # Simulate sensing (uses ground truth for simulation accuracy)
+            detected, confidence = self.sensor_model.sense_cell(
+                distance=np.sqrt((x - agent.x)**2 + (y - agent.y)**2),
+                is_obstacle=obstacles[y, x]
+            )
+            
+            # Update obstacle belief
+            if obstacles[y, x]:
+                if detected:
+                    obstacle_belief[y, x] = min(1.0, obstacle_belief[y, x] + prob * 0.8)
+            else:
+                if detected:
+                    obstacle_belief[y, x] = max(0.0, obstacle_belief[y, x] - prob * 0.5)
+                    
+                    # Update coverage (but NOT visited!)
+                    prior = coverage[y, x]
+                    likelihood = prob
+                    posterior = prior + (1 - prior) * likelihood
+                    coverage[y, x] = min(1.0, posterior)
+                    coverage_confidence[y, x] = min(1.0, coverage_confidence[y, x] + confidence * 0.1)
+    
     def _update_coverage(
         self,
         agent: AgentState,
@@ -959,6 +1008,7 @@ class CoverageEnvironment:
         Update coverage AND obstacle belief based on agent's sensing.
         
         Uses probabilistic sensor model to detect both coverage and obstacles.
+        Also marks cells as VISITED (only called during active movement).
         
         Args:
             agent: Agent performing the sensing
@@ -1016,8 +1066,8 @@ class CoverageEnvironment:
         """
         Check if position (y, x) has any unvisited neighbors.
 
-        This is used for frontier bonus computation and must be called
-        BEFORE updating the visited array to avoid the shallow copy bug.
+        This is used for frontier bonus computation and is called
+        AFTER moving but BEFORE updating the visited array.
 
         Args:
             y: Y coordinate
@@ -1032,14 +1082,16 @@ class CoverageEnvironment:
             (1, -1),  (1, 0),  (1, 1)
         ]
         H, W = self.state.visited.shape
-
+        
+        unvisited_count = 0
         for dy, dx in neighbor_offsets:
             ny, nx = y + dy, x + dx
             if (0 <= ny < H and 0 <= nx < W and
                 not self.state.visited[ny, nx] and
                 not self.state.obstacles[ny, nx]):
-                return True
-        return False
+                unvisited_count += 1
+        
+        return unvisited_count > 0
 
     def step(self, action: int, agent_id: int = 0) -> Tuple[np.ndarray, float, bool, Dict]:
         """
@@ -1069,13 +1121,13 @@ class CoverageEnvironment:
 
         # Get agent
         agent = self.state.agents[agent_id]
+        
+        # Save old position for debugging
+        old_x, old_y = agent.x, agent.y
 
         # Compute new position
         new_x = np.clip(agent.x + dx, 0, self.grid_size - 1)
         new_y = np.clip(agent.y + dy, 0, self.grid_size - 1)
-
-        # Check frontier status BEFORE moving (critical for frontier bonus!)
-        is_on_frontier = self._has_unvisited_neighbors(new_y, new_x)
 
         # Save last action for rotation penalty
         last_action = self.state.last_action if self.state.last_action is not None else action
@@ -1090,11 +1142,18 @@ class CoverageEnvironment:
             # Update agent position
             agent.x = new_x
             agent.y = new_y
+        
+        # Track if agent actually moved
+        actually_moved = (agent.x != old_x or agent.y != old_y)
 
         # Check revisit BEFORE updating coverage (critical for revisit penalty!)
         is_revisit = self.state.visited[agent.y, agent.x]
         if is_revisit:
             self.episode_stats['revisits'] += 1
+
+        # CRITICAL FIX: Check frontier status AFTER moving but BEFORE updating coverage
+        # This checks if the new position has unvisited neighbors (is at exploration boundary)
+        is_on_frontier = self._has_unvisited_neighbors(agent.y, agent.x)
 
         # Update coverage AND obstacle belief based on new position
         self._update_coverage(
@@ -1137,10 +1196,16 @@ class CoverageEnvironment:
         # Compute coverage percentage for early completion check
         coverage_pct = self._compute_coverage_percentage()
         
-        # Check for early completion bonus
-        early_completion_bonus = self.reward_fn.compute_early_completion_bonus(
-            coverage_pct, self.state.step, self.max_steps
-        )
+        # Check done BEFORE adding early completion bonus
+        done = (self.state.step >= self.max_steps or coverage_pct >= 0.99)
+        
+        # CRITICAL FIX: Only give early completion bonus on the FINAL step (when done=True)
+        # This prevents the bonus from being added every step after 95% coverage
+        early_completion_bonus = 0.0
+        if done:
+            early_completion_bonus = self.reward_fn.compute_early_completion_bonus(
+                coverage_pct, self.state.step, self.max_steps
+            )
         
         if early_completion_bonus > 0:
             reward_breakdown['early_completion'] = early_completion_bonus
@@ -1150,14 +1215,10 @@ class CoverageEnvironment:
         
         self.episode_stats['total_reward'] += reward
         
-        # Check done
-        done = (self.state.step >= self.max_steps or 
-                self._compute_coverage_percentage() >= 0.99)
-        
         # Update stats
         self.episode_stats['coverage_percentage'] = self._compute_coverage_percentage()
         
-        # Prepare info
+        # Prepare info with debugging data
         info = {
             'coverage_pct': self.episode_stats['coverage_percentage'],
             'steps': self.state.step,
@@ -1165,7 +1226,13 @@ class CoverageEnvironment:
             'revisits': self.episode_stats['revisits'],
             'reward_breakdown': reward_breakdown,
             'num_frontiers': len(self.state.frontiers),
-            'agent_position': (agent.x, agent.y)
+            'agent_position': (agent.x, agent.y),
+            # DEBUG: Detailed diagnostics
+            'coverage_gain': coverage_gain,
+            'confidence_gain': confidence_gain,
+            'is_on_frontier': is_on_frontier,
+            'actually_moved': actually_moved,
+            'action_name': Action(action).name
         }
         
         return self._encode_observation(), reward, done, info

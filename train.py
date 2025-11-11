@@ -396,10 +396,14 @@ def train(config: ExperimentConfig, curriculum_type: str = 'default'):
         curriculum.print_status()
 
     # Create agent (with mixed precision enabled)
+    # POMDP adds visibility mask as 6th channel
+    use_pomdp = True
+    input_channels = 6 if use_pomdp else 5
+    
     agent = CoordinateDQNAgent(
-        input_channels=config.model.input_channels,
+        input_channels=input_channels,
         num_actions=config.model.num_actions,
-        use_pomdp=True,
+        use_pomdp=use_pomdp,
         sensor_range=4.0,
         learning_rate=config.training.learning_rate,
         gamma=config.training.gamma,

@@ -67,7 +67,8 @@ EARLY_TERM_TIME_BONUS_PER_STEP = 0.01  # Bonus per step saved
 @dataclass
 class ModelConfig:
     """Configuration for the FCN model."""
-    input_channels: int = 5
+    input_channels: int = 5  # Base channels (visited, coverage, agent, frontiers, obstacles)
+                              # Note: POMDP adds visibility mask as 6th channel (set in train.py)
     hidden_channels: List[int] = field(default_factory=lambda: [64, 128, 256])
     num_actions: int = 9
     dropout: float = 0.1
@@ -116,7 +117,7 @@ class EnvironmentConfig:
     revisit_penalty: float = -0.08  # Penalty for revisiting (strong enough to discourage loops)
     collision_penalty: float = -0.3  # Penalty for collision (needs to be noticeable)
     step_penalty: float = -0.0004  # Small step penalty (encourages efficiency)
-    frontier_bonus: float = 0.01  # Reduced to FCN-level conservative value (40× smaller) to prevent reward imbalance
+    frontier_bonus: float = 0.2  # INCREASED: Meaningful guidance signal (was 0.01 - 20× increase)
     coverage_confidence_weight: float = 0.03  # Weight for coverage confidence
     first_visit_bonus: float = 0.5  # NEW: Large bonus for discovering new cells (primary exploration signal)
 
