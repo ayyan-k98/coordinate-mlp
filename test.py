@@ -284,8 +284,6 @@ def main():
     agent = CoordinateDQNAgent(
         input_channels=config.model.input_channels,
         num_actions=config.model.num_actions,
-        hidden_dim=config.model.hidden_dim,
-        num_freq_bands=config.model.num_freq_bands,
         device=config.training.device
     )
     

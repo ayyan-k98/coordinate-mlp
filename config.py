@@ -183,41 +183,29 @@ def get_default_config() -> ExperimentConfig:
 def get_ablation_configs() -> dict:
     """
     Get configurations for ablation studies.
-    
+
     Returns:
         Dictionary of config_name -> config
     """
     configs = {}
-    
-    # Baseline
+
+    # Baseline (multi-scale FCN)
     configs['baseline'] = get_default_config()
-    
-    # Without Fourier features
-    config = get_default_config()
-    config.experiment_name = "ablation_no_fourier"
-    config.model.num_freq_bands = 0  # Only use raw coordinates
-    configs['no_fourier'] = config
-    
-    # Without attention
-    config = get_default_config()
-    config.experiment_name = "ablation_mean_pool"
-    config.model.num_attention_heads = 0  # Use mean pooling instead
-    configs['mean_pool'] = config
-    
+
     # Single scale training
     config = get_default_config()
     config.experiment_name = "single_scale"
     config.training.multi_scale = False
     config.training.grid_sizes = [20]
     configs['single_scale'] = config
-    
-    # Different hidden dimensions
-    for hidden_dim in [128, 256, 512]:
+
+    # Different dropout rates
+    for dropout in [0.0, 0.1, 0.2]:
         config = get_default_config()
-        config.experiment_name = f"hidden_dim_{hidden_dim}"
-        config.model.hidden_dim = hidden_dim
-        configs[f'hidden_{hidden_dim}'] = config
-    
+        config.experiment_name = f"dropout_{dropout}"
+        config.model.dropout = dropout
+        configs[f'dropout_{dropout}'] = config
+
     return configs
 
 
@@ -231,7 +219,7 @@ if __name__ == "__main__":
     config = get_default_config()
     print(f"\nDefault configuration:")
     print(f"  Experiment: {config.experiment_name}")
-    print(f"  Model hidden dim: {config.model.hidden_dim}")
+    print(f"  Model hidden channels: {config.model.hidden_channels}")
     print(f"  Training episodes: {config.training.num_episodes}")
     print(f"  Multi-scale: {config.training.multi_scale}")
     print(f"  Grid sizes: {config.training.grid_sizes}")

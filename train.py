@@ -397,12 +397,10 @@ def train(config: ExperimentConfig, curriculum_type: str = 'default'):
 
     # Create agent (with mixed precision enabled)
     agent = CoordinateDQNAgent(
-        input_channels=6,  # 6 input channels for coordinate MLP
+        input_channels=config.model.input_channels,
         num_actions=config.model.num_actions,
         use_pomdp=True,
         sensor_range=4.0,
-        hidden_dim=config.model.hidden_dim,
-        num_freq_bands=config.model.num_freq_bands,
         learning_rate=config.training.learning_rate,
         gamma=config.training.gamma,
         epsilon_start=config.training.epsilon_start,
@@ -652,8 +650,6 @@ def main():
                        help='Device to use')
     parser.add_argument('--seed', type=int, default=42,
                        help='Random seed')
-    parser.add_argument('--hidden-dim', type=int, default=256,
-                       help='Hidden dimension size')
     parser.add_argument('--curriculum', type=str, default='default',
                        choices=['default', 'fast', 'none'],
                        help='Curriculum type: default (full), fast (shorter), none (disabled)')
@@ -667,7 +663,6 @@ def main():
     config.training.multi_scale = args.multi_scale
     config.training.device = args.device
     config.seed = args.seed
-    config.model.hidden_dim = args.hidden_dim
 
     # Train with curriculum
     train(config, curriculum_type=args.curriculum)
