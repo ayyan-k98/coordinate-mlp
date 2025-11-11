@@ -36,7 +36,7 @@ NUM_RAYS = 72  # Number of rays for raycasting
 SAMPLES_PER_RAY = 20  # Samples per ray
 
 # Probabilistic environment settings
-USE_PROBABILISTIC_ENV = False  # Use probabilistic coverage model
+USE_PROBABILISTIC_ENV = True  # Use probabilistic coverage model
 PROBABILISTIC_COVERAGE_MIDPOINT = 2.0  # Sigmoid midpoint for coverage probability
 PROBABILISTIC_COVERAGE_STEEPNESS = 1.5  # Sigmoid steepness
 COVERAGE_THRESHOLD = 0.9  # Threshold for considering a cell covered
