@@ -109,7 +109,7 @@ class EnvironmentConfig:
     """Configuration for the coverage environment."""
     base_grid_size: int = 20
     sensor_range_ratio: float = 0.2  # sensor_range = grid_size * ratio
-    max_steps_ratio: float = 350  # max_steps = ratio * (grid_size / 20)^2
+    max_steps_ratio: float = 370  # max_steps = ratio * (grid_size / 20)^2
     obstacle_density: float = 0.15  # Fraction of cells that are obstacles
 
     # Reward configuration (matches coverage_env.py RewardFunction)

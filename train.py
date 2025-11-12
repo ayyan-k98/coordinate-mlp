@@ -18,7 +18,6 @@ from logger import Logger, TensorBoardLogger
 from metrics import compute_metrics, aggregate_metrics
 from coverage_env import CoverageEnvironment
 from curriculum import CurriculumScheduler, create_default_curriculum, create_fast_curriculum, create_no_curriculum
-from curriculum_mixed import MixedCurriculumScheduler, create_mixed_curriculum, create_fast_mixed_curriculum
 from performance_optimizations import (
     PerformanceConfig,
     setup_performance_optimizations,
@@ -380,33 +379,17 @@ def train(config: ExperimentConfig, curriculum_type: str = 'default'):
     mp_trainer = MixedPrecisionTrainer(enabled=perf_config.use_amp, device=device)
 
     # Initialize curriculum scheduler based on type
-    # IMPORTANT: 'mixed' prevents catastrophic forgetting by keeping all map types visible
-    use_mixed_curriculum = curriculum_type in ['mixed', 'mixed_fast']
+    if curriculum_type == 'fast':
+        curriculum_config = create_fast_curriculum()
+    elif curriculum_type == 'none':
+        curriculum_config = create_no_curriculum()
+    else:  # 'default'
+        curriculum_config = create_default_curriculum()
 
-    if use_mixed_curriculum:
-        # MIXED CURRICULUM (Recommended): Prevents catastrophic forgetting
-        if curriculum_type == 'mixed_fast':
-            curriculum_config = create_fast_mixed_curriculum()
-        else:  # 'mixed'
-            curriculum_config = create_mixed_curriculum()
-
-        curriculum = MixedCurriculumScheduler(
-            curriculum_config,
-            grid_sizes=config.training.grid_sizes if config.training.multi_scale else [config.environment.base_grid_size]
-        )
-    else:
-        # SEQUENTIAL CURRICULUM (Old): May cause catastrophic forgetting
-        if curriculum_type == 'fast':
-            curriculum_config = create_fast_curriculum()
-        elif curriculum_type == 'none':
-            curriculum_config = create_no_curriculum()
-        else:  # 'default'
-            curriculum_config = create_default_curriculum()
-
-        curriculum = CurriculumScheduler(
-            curriculum_config,
-            grid_sizes=config.training.grid_sizes if config.training.multi_scale else [config.environment.base_grid_size]
-        )
+    curriculum = CurriculumScheduler(
+        curriculum_config,
+        grid_sizes=config.training.grid_sizes if config.training.multi_scale else [config.environment.base_grid_size]
+    )
 
     print(f"\nCurriculum Learning: {'Enabled' if curriculum_config.enabled else 'Disabled'}")
     if curriculum_config.enabled:
@@ -614,6 +597,15 @@ def train(config: ExperimentConfig, curriculum_type: str = 'default'):
                     tb_logger.log_scalar(f'val_type/{map_type}_coverage', 
                                         type_metrics['coverage_mean'], episode)
             
+            # Print per-map-type breakdown
+            print(f"\n📊 Validation Breakdown by Map Type:")
+            for map_type in ["empty", "random", "corridor", "cave"]:
+                if map_type in eval_metrics['by_type']:
+                    type_metrics = eval_metrics['by_type'][map_type]
+                    cov = type_metrics['coverage_mean'] * 100
+                    std = type_metrics['coverage_std'] * 100
+                    print(f"   {map_type:10s}: {cov:5.1f}% ± {std:4.1f}%")
+            
             # Update best model based on validation coverage
             val_coverage = eval_metrics['overall']['coverage_mean']
             if val_coverage > best_coverage:
@@ -624,22 +616,28 @@ def train(config: ExperimentConfig, curriculum_type: str = 'default'):
                 save_path = os.path.join(config.checkpoint_dir,
                                         f"{config.experiment_name}_best.pt")
                 agent.save(save_path)
-                print(f"✅ New best validation coverage: {best_coverage*100:.1f}% (model saved)")
+                print(f"\n✅ New best validation coverage: {best_coverage*100:.1f}% (model saved)")
                 if improvement > 0:
                     print(f"   Improvement: +{improvement:.1f}% from previous best")
             else:
                 episodes_without_improvement += config.training.eval_frequency
-                print(f"   Current best: {best_coverage*100:.1f}% (from episode {best_episode})")
-                print(f"   Episodes without improvement: {episodes_without_improvement}/{patience}")
+                print(f"\n   Current best: {best_coverage*100:.1f}% (from episode {best_episode})")
+                print(f"   Episodes since last improvement: {episodes_without_improvement} (early stopping DISABLED)")
 
-                # Early stopping check (only if enabled and past warmup)
-                if episodes_without_improvement >= patience and episode > config.training.warmup_episodes * 2:
+                # Early stopping DISABLED for curriculum learning
+                # Problem: Early stopping penalizes specialization during curriculum phases
+                # Example: Agent masters empty maps (99%) but drops to 85% when learning
+                # random maps. This is GOOD (generalization), but early stopping sees it as
+                # regression and stops training prematurely.
+                # Solution: Train full 1500 episodes, save best checkpoints, evaluate retroactively
+                if False and episodes_without_improvement >= patience and episode > config.training.warmup_episodes * 2:
                     print(f"\n{'='*70}")
-                    print(f"⏹️  Early stopping triggered!")
+                    print(f"⏹️  Early stopping would trigger here, but DISABLED")
                     print(f"   No improvement for {episodes_without_improvement} episodes")
                     print(f"   Best coverage: {best_coverage*100:.1f}% at episode {best_episode}")
+                    print(f"   Continuing training for full curriculum...")
                     print(f"{'='*70}")
-                    break  # Exit training loop
+                    # break  # DISABLED - always train full episodes
     
     print("-"*70)
     print("Training complete!")
@@ -674,8 +672,8 @@ def main():
     parser.add_argument('--seed', type=int, default=42,
                        help='Random seed')
     parser.add_argument('--curriculum', type=str, default='default',
-                       choices=['default', 'fast', 'none', 'mixed', 'mixed_fast'],
-                       help='Curriculum type: default (sequential), fast (shorter), none (disabled), mixed (prevents forgetting), mixed_fast (shorter mixed)')
+                       choices=['default', 'fast', 'none'],
+                       help='Curriculum type: default (full), fast (shorter), none (disabled)')
 
     args = parser.parse_args()
 

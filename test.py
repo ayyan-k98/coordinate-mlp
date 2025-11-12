@@ -292,10 +292,11 @@ def main():
         print(f"Error: Checkpoint not found: {args.checkpoint}")
         return
     
-    agent.load(args.checkpoint)
+    # Use weights_only=True for evaluation (secure loading)
+    agent.load(args.checkpoint, weights_only=True)
     print(f"\nModel loaded successfully")
     print(f"  Parameters: {agent.policy_net.get_num_parameters():,}")
-    print(f"  Training episodes: {agent.episodes}")
+    print(f"  Epsilon: {agent.epsilon}")
     
     # Test on multiple grid sizes
     results = test_grid_size_invariance(agent, config)

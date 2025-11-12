@@ -354,7 +354,7 @@ class RewardFunction:
         rotation_penalty_large: float = -0.5,  # >90° 10× scaled (was -0.05)
         stay_penalty: float = -1.0,  # 10× scaled: movement incentive (was -0.1)
         enable_early_completion: bool = True,  # Enable early completion bonus
-        early_completion_threshold: float = 0.95,  # Coverage threshold for bonus
+        early_completion_threshold: float = 0.92,  # Coverage threshold for bonus (92% of 90%-confidence cells)
         early_completion_bonus: float = 10.0,  # Significant bonus for early completion
         time_bonus_per_step_saved: float = 0.005,  # Small efficiency bonus (~0.5-4.0 total)
         use_progressive_revisit_penalty: bool = True,  # Progressive penalty scaling
@@ -1197,7 +1197,8 @@ class CoverageEnvironment:
         coverage_pct = self._compute_coverage_percentage()
         
         # Check done BEFORE adding early completion bonus
-        done = (self.state.step >= self.max_steps or coverage_pct >= 0.99)
+        # With 0.9 threshold, 0.95 means 95% of cells have ≥90% confidence (very thorough coverage)
+        done = (self.state.step >= self.max_steps or coverage_pct >= 0.95)
         
         # CRITICAL FIX: Only give early completion bonus on the FINAL step (when done=True)
         # This prevents the bonus from being added every step after 95% coverage
@@ -1218,15 +1219,24 @@ class CoverageEnvironment:
         # Update stats
         self.episode_stats['coverage_percentage'] = self._compute_coverage_percentage()
         
+        # Multi-threshold coverage metrics for quality analysis
+        total_coverable = (~self.state.obstacles).sum()
+        
         # Prepare info with debugging data
         info = {
-            'coverage_pct': self.episode_stats['coverage_percentage'],
+            'coverage_pct': self.episode_stats['coverage_percentage'],  # 90% threshold (primary)
             'steps': self.state.step,
             'collisions': self.episode_stats['collisions'],
             'revisits': self.episode_stats['revisits'],
             'reward_breakdown': reward_breakdown,
             'num_frontiers': len(self.state.frontiers),
             'agent_position': (agent.x, agent.y),
+            # Multi-threshold coverage quality metrics
+            'cells_ever_sensed': (self.state.coverage > 0.0).sum() / total_coverable if total_coverable > 0 else 0.0,
+            'coverage_pct_50': (self.state.coverage > 0.5).sum() / total_coverable if total_coverable > 0 else 0.0,
+            'coverage_pct_70': (self.state.coverage > 0.7).sum() / total_coverable if total_coverable > 0 else 0.0,
+            'coverage_pct_90': self.episode_stats['coverage_percentage'],  # Primary metric (same as coverage_pct)
+            'coverage_pct_95': (self.state.coverage > 0.95).sum() / total_coverable if total_coverable > 0 else 0.0,
             # DEBUG: Detailed diagnostics
             'coverage_gain': coverage_gain,
             'confidence_gain': confidence_gain,
@@ -1238,9 +1248,16 @@ class CoverageEnvironment:
         return self._encode_observation(), reward, done, info
     
     def _compute_coverage_percentage(self) -> float:
-        """Compute coverage percentage (excluding obstacles)."""
+        """
+        Compute coverage percentage (excluding obstacles).
+        
+        Uses 0.9 threshold for high-quality coverage:
+        - Requires multiple sensor passes or very close sensing
+        - Aligns with mission-critical reliability (90% confidence)
+        - Rewards still use continuous probabilities (not affected by threshold)
+        """
         total_coverable = (~self.state.obstacles).sum()
-        covered = (self.state.coverage > 0.5).sum()  # Threshold at 50% confidence
+        covered = (self.state.coverage > 0.9).sum()  # Threshold at 90% confidence (high-quality coverage)
         return covered / total_coverable if total_coverable > 0 else 0.0
     
     def _encode_observation(self) -> np.ndarray:

@@ -516,12 +516,20 @@ def main():
         device=args.device
     )
 
-    # Load weights
-    checkpoint = torch.load(args.checkpoint, map_location=device)
-    agent.policy_net.load_state_dict(checkpoint['policy_net_state_dict'])
+    # Load weights (PyTorch 2.6+ compatible)
+    checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=True)
+    
+    # Handle different checkpoint formats
+    if 'policy_net' in checkpoint:
+        agent.policy_net.load_state_dict(checkpoint['policy_net'])
+    elif 'policy_net_state_dict' in checkpoint:
+        agent.policy_net.load_state_dict(checkpoint['policy_net_state_dict'])
+    else:
+        raise KeyError("Checkpoint must contain 'policy_net' or 'policy_net_state_dict'")
+    
     agent.policy_net.eval()
 
-    print(f"✅ Checkpoint loaded from episode {checkpoint.get('episode', 'unknown')}\n")
+    print(f"✅ Checkpoint loaded successfully\n")
 
     # Run evaluations
     print("="*80)

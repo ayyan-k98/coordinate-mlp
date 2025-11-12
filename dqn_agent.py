@@ -501,32 +501,43 @@ class CoordinateDQNAgent:
         self.epsilon = max(self.epsilon_end, self.epsilon * self.epsilon_decay)
     
     def save(self, path: str):
-        """Save agent state to file."""
-        # Save all replay buffers
-        memory_states = {size: list(mem.memory) for size, mem in self.memories.items()}
-        
+        """Save agent state to file (PyTorch 2.6+ compatible)."""
+        # Only save essential training state (no replay buffer to avoid pickling issues)
         torch.save({
             'policy_net': self.policy_net.state_dict(),
             'target_net': self.target_net.state_dict(),
             'optimizer': self.optimizer.state_dict(),
             'epsilon': self.epsilon,
             'training_steps': self.training_steps,
-            'memories': memory_states,  # Save all buffers
         }, path)
     
-    def load(self, path: str):
-        """Load agent state from file."""
-        checkpoint = torch.load(path, map_location=self.device)
+    def load(self, path: str, weights_only: bool = True):
+        """
+        Load agent state from file (PyTorch 2.6+ compatible).
+        
+        Args:
+            path: Path to checkpoint file
+            weights_only: If True, only load model weights (secure). 
+                         If False, load all state including optimizer (for resuming training).
+        """
+        if weights_only:
+            # Secure loading: only weights, no arbitrary code execution
+            checkpoint = torch.load(path, map_location=self.device, weights_only=True)
+        else:
+            # Full loading: includes optimizer state for training resume
+            checkpoint = torch.load(path, map_location=self.device, weights_only=False)
+        
         self.policy_net.load_state_dict(checkpoint['policy_net'])
         self.target_net.load_state_dict(checkpoint['target_net'])
-        self.optimizer.load_state_dict(checkpoint['optimizer'])
-        self.epsilon = checkpoint['epsilon']
-        self.training_steps = checkpoint.get('training_steps', 0)
         
-        # Load all replay buffers if available
-        if 'memories' in checkpoint:
-            for size, memory_list in checkpoint['memories'].items():
-                self.memories[size].memory = deque(memory_list, maxlen=self.memories[size].capacity)
+        # Only load optimizer if not weights_only mode
+        if not weights_only and 'optimizer' in checkpoint:
+            self.optimizer.load_state_dict(checkpoint['optimizer'])
+        
+        if 'epsilon' in checkpoint:
+            self.epsilon = checkpoint['epsilon']
+        if 'training_steps' in checkpoint:
+            self.training_steps = checkpoint.get('training_steps', 0)
 
 if __name__ == "__main__":
     # Unit test
