@@ -221,18 +221,271 @@ def plot_grid_size_comparison(
         plt.show()
 
 
+# ============================================================================
+# Path Tracking and Episode Visualization
+# ============================================================================
+
+from dataclasses import dataclass
+from matplotlib.colors import LinearSegmentedColormap
+from matplotlib.patches import Circle
+import os
+
+
+@dataclass
+class StepRecord:
+    """Record of a single step in the episode."""
+    step: int
+    agent_pos: tuple  # (y, x)
+    action: int
+    reward: float
+    coverage: float
+    coverage_map: np.ndarray
+    obstacles: np.ndarray
+    frontiers: np.ndarray
+    visited: np.ndarray
+
+
+class PathVisualizer:
+    """
+    Visualize agent paths and coverage heatmaps during episodes.
+
+    Features:
+    - Track agent trajectory
+    - Generate visit count heatmaps
+    - Create summary plots with multiple panels
+    - Export visualizations for analysis
+    """
+
+    def __init__(
+        self,
+        grid_size: int = 20,
+        save_dir: str = "visualizations",
+        track_visit_counts: bool = True
+    ):
+        """
+        Args:
+            grid_size: Size of the grid environment
+            save_dir: Directory to save visualizations
+            track_visit_counts: Whether to track per-cell visit counts
+        """
+        self.grid_size = grid_size
+        self.save_dir = save_dir
+        self.track_visit_counts = track_visit_counts
+
+        os.makedirs(save_dir, exist_ok=True)
+
+        # Episode recording
+        self.steps: List[StepRecord] = []
+        self.visit_counts = np.zeros((grid_size, grid_size), dtype=np.int32)
+        self.coverage_over_time = []
+        self.reward_over_time = []
+
+        # Action names
+        self.action_names = {
+            0: "N", 1: "NE", 2: "E", 3: "SE",
+            4: "S", 5: "SW", 6: "W", 7: "NW",
+            8: "STAY"
+        }
+
+        # Color schemes
+        self.setup_colormaps()
+
+    def setup_colormaps(self):
+        """Setup custom colormaps."""
+        self.coverage_cmap = LinearSegmentedColormap.from_list(
+            'coverage', ['white', 'lightblue', 'blue', 'darkblue']
+        )
+        self.visit_cmap = LinearSegmentedColormap.from_list(
+            'visits', ['white', 'yellow', 'orange', 'red', 'darkred']
+        )
+        self.path_cmap = plt.cm.viridis
+
+    def reset(self):
+        """Reset recording for new episode."""
+        self.steps = []
+        self.visit_counts = np.zeros((self.grid_size, self.grid_size), dtype=np.int32)
+        self.coverage_over_time = []
+        self.reward_over_time = []
+
+    def record_step(
+        self,
+        agent_pos: tuple,
+        action: int,
+        reward: float,
+        coverage_pct: float,
+        coverage_map: np.ndarray,
+        obstacles: np.ndarray,
+        frontiers: np.ndarray,
+        visited: np.ndarray,
+        step: int
+    ):
+        """Record a single step during episode."""
+        if self.track_visit_counts:
+            self.visit_counts[agent_pos[0], agent_pos[1]] += 1
+
+        step_record = StepRecord(
+            step=step,
+            agent_pos=agent_pos,
+            action=action,
+            reward=reward,
+            coverage=coverage_pct,
+            coverage_map=coverage_map.copy(),
+            obstacles=obstacles.copy(),
+            frontiers=frontiers.copy(),
+            visited=visited.copy()
+        )
+
+        self.steps.append(step_record)
+        self.coverage_over_time.append(coverage_pct)
+        self.reward_over_time.append(reward)
+
+    def get_path_coordinates(self) -> np.ndarray:
+        """Get agent path as array of (y, x) coordinates."""
+        return np.array([step.agent_pos for step in self.steps])
+
+    def save_summary_plot(
+        self,
+        filename: str,
+        steps_to_show: Optional[List[int]] = None
+    ):
+        """
+        Save summary plot showing key moments from episode.
+
+        Args:
+            filename: Output filename
+            steps_to_show: Step indices to show (default: start, 25%, 50%, 75%, end)
+        """
+        if len(self.steps) == 0:
+            print("No steps recorded to visualize")
+            return
+
+        filepath = os.path.join(self.save_dir, filename)
+
+        if steps_to_show is None:
+            num_steps = len(self.steps)
+            steps_to_show = [
+                0,
+                num_steps // 4,
+                num_steps // 2,
+                3 * num_steps // 4,
+                num_steps - 1
+            ]
+
+        num_panels = len(steps_to_show)
+        fig, axes = plt.subplots(1, num_panels, figsize=(5*num_panels, 5))
+
+        if num_panels == 1:
+            axes = [axes]
+
+        for idx, step_idx in enumerate(steps_to_show):
+            ax = axes[idx]
+            step = self.steps[step_idx]
+
+            # Plot environment snapshot
+            base_map = np.ones((self.grid_size, self.grid_size, 3))
+            base_map[step.obstacles > 0.5] = [0.3, 0.3, 0.3]
+
+            coverage_colored = self.coverage_cmap(step.coverage_map)[:, :, :3]
+            alpha = step.coverage_map[:, :, np.newaxis]
+            base_map = base_map * (1 - alpha) + coverage_colored * alpha
+
+            ax.imshow(base_map, extent=[0, self.grid_size, self.grid_size, 0])
+
+            # Show path
+            path = self.get_path_coordinates()[:step_idx+1]
+            if len(path) > 1:
+                colors = self.path_cmap(np.linspace(0, 1, len(path)))
+                for i in range(len(path) - 1):
+                    ax.plot(
+                        [path[i, 1] + 0.5, path[i+1, 1] + 0.5],
+                        [path[i, 0] + 0.5, path[i+1, 0] + 0.5],
+                        color=colors[i],
+                        alpha=0.6,
+                        linewidth=1.5
+                    )
+
+            # Agent position
+            ax.add_patch(Circle(
+                (step.agent_pos[1] + 0.5, step.agent_pos[0] + 0.5),
+                radius=0.4,
+                color='red',
+                zorder=10
+            ))
+
+            ax.set_xlim(0, self.grid_size)
+            ax.set_ylim(self.grid_size, 0)
+            ax.set_aspect('equal')
+            ax.set_title(f'Step {step_idx}\nCoverage: {step.coverage:.1%}')
+            ax.axis('off')
+
+        plt.tight_layout()
+        plt.savefig(filepath, dpi=150, bbox_inches='tight')
+        plt.close()
+
+        print(f"✅ Summary plot saved: {filepath}")
+
+    def save_final_heatmap(self, filename: str):
+        """Save final visit count heatmap."""
+        filepath = os.path.join(self.save_dir, filename)
+
+        fig, ax = plt.subplots(figsize=(10, 8))
+
+        final_step = self.steps[-1]
+        visit_display = self.visit_counts.copy().astype(float)
+        visit_display[final_step.obstacles > 0.5] = np.nan
+
+        im = ax.imshow(
+            visit_display,
+            cmap=self.visit_cmap,
+            interpolation='nearest'
+        )
+
+        # Overlay path
+        path = self.get_path_coordinates()
+        if len(path) > 1:
+            ax.plot(path[:, 1], path[:, 0], 'b-', alpha=0.3, linewidth=1)
+            ax.plot(path[0, 1], path[0, 0], 'go', markersize=10, label='Start')
+            ax.plot(path[-1, 1], path[-1, 0], 'ro', markersize=10, label='End')
+
+        ax.set_title(f'Visit Heatmap - {len(self.steps)} steps')
+        ax.set_xlabel('X')
+        ax.set_ylabel('Y')
+        ax.legend()
+
+        cbar = plt.colorbar(im, ax=ax)
+        cbar.set_label('Number of Visits')
+
+        # Statistics
+        stats_text = f"""Statistics:
+Total Steps: {len(self.steps)}
+Unique Cells: {(self.visit_counts > 0).sum()}
+Max Revisits: {self.visit_counts.max()}
+Avg Revisits: {self.visit_counts[self.visit_counts > 0].mean():.1f}
+Final Coverage: {self.coverage_over_time[-1]:.1%}
+"""
+        ax.text(1.15, 0.5, stats_text, transform=ax.transAxes,
+               fontsize=10, verticalalignment='center',
+               bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+
+        plt.tight_layout()
+        plt.savefig(filepath, dpi=150, bbox_inches='tight')
+        plt.close()
+
+        print(f"✅ Heatmap saved: {filepath}")
+
+
 if __name__ == "__main__":
     print("="*60)
     print("Testing Visualization")
     print("="*60)
-    
+
     # Test 1: Attention visualization
     print("\nTest 1: Attention visualization")
     H, W = 20, 20
     attention = torch.randn(4, 1, H*W).softmax(dim=-1)  # 4 heads
     visualize_attention(attention, (H, W), title="Test Attention Map")
     print("  ✓ Attention map generated")
-    
+
     # Test 2: Training curves
     print("\nTest 2: Training curves")
     metrics_history = []
@@ -244,16 +497,16 @@ if __name__ == "__main__":
         })
     plot_training_curves(metrics_history)
     print("  ✓ Training curves generated")
-    
+
     # Test 3: Coverage heatmap
     print("\nTest 3: Coverage heatmap")
     coverage_map = np.random.rand(H, W) > 0.5
     obstacle_map = np.random.rand(H, W) > 0.85
-    trajectory = [(np.random.randint(0, W), np.random.randint(0, H)) 
+    trajectory = [(np.random.randint(0, W), np.random.randint(0, H))
                   for _ in range(50)]
     plot_coverage_heatmap(coverage_map, obstacle_map, trajectory)
     print("  ✓ Coverage heatmap generated")
-    
+
     # Test 4: Grid size comparison
     print("\nTest 4: Grid size comparison")
     results = {
@@ -265,6 +518,30 @@ if __name__ == "__main__":
     }
     plot_grid_size_comparison(results, baseline_size=20)
     print("  ✓ Grid size comparison generated")
-    
+
+    # Test 5: Path visualizer
+    print("\nTest 5: Path visualizer")
+    visualizer = PathVisualizer(grid_size=20, save_dir="test_visualizations")
+    visualizer.reset()
+
+    # Simulate episode
+    for step in range(50):
+        pos = (step // 5, step % 20)
+        visualizer.record_step(
+            agent_pos=pos,
+            action=step % 9,
+            reward=0.1,
+            coverage_pct=step / 50.0,
+            coverage_map=np.random.rand(20, 20),
+            obstacles=np.random.rand(20, 20) > 0.9,
+            frontiers=np.random.rand(20, 20) > 0.95,
+            visited=np.random.rand(20, 20) > 0.5,
+            step=step
+        )
+
+    visualizer.save_summary_plot("test_summary.png")
+    visualizer.save_final_heatmap("test_heatmap.png")
+    print("  ✓ Path visualization generated")
+
     print("\n✓ Visualization test complete!")
     print("\nNote: Close plot windows to continue...")
