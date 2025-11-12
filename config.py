@@ -88,6 +88,7 @@ class TrainingConfig:
     memory_capacity: int = 50000
     target_update_tau: float = 0.01
     target_update_frequency: int = 1  # Update every N episodes (soft update via tau)
+    update_frequency: int = 4  # Update network every N steps (standard DQN = 4)
 
     # Training schedule
     num_episodes: int = 1500

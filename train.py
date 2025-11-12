@@ -258,24 +258,26 @@ def train_episode(
             agent.store_transition(state_with_mask, action, reward, next_state_with_mask, done, grid_size)
         else:
             agent.store_transition(state, action, reward, next_state, done, grid_size)
-        # Update agent (after warmup)
+        
+        # Update agent (after warmup, every N steps)
         # Pass grid_size to sample from correct buffer
         if episode >= config.training.warmup_episodes:
-            update_info = agent.update(grid_size=grid_size)
-            if update_info:
-                losses.append(update_info['loss'])
-                q_values_list.append(update_info['q_mean'])
-                td_errors_list.append(update_info['td_error_mean'])
-                grad_norms_list.append(update_info['grad_norm'])
+            if episode_steps % config.training.update_frequency == 0:
+                update_info = agent.update(grid_size=grid_size)
+                if update_info:
+                    losses.append(update_info['loss'])
+                    q_values_list.append(update_info['q_mean'])
+                    td_errors_list.append(update_info['td_error_mean'])
+                    grad_norms_list.append(update_info['grad_norm'])
 
-                # Explosion detection (FCN-level threshold)
-                if update_info['grad_norm'] > 25.0:
-                    print(f"\n⚠️  GRADIENT EXPLOSION DETECTED at step {episode_steps}")
-                    print(f"   Gradient norm: {update_info['grad_norm']:.2f} (threshold: 25.0)")
-                    print(f"   Q-values: mean={update_info['q_mean']:.2f}, max={update_info['q_max']:.2f}")
-                    print(f"   Stopping episode early to prevent training collapse\n")
-                    # Mark explosion and break episode
-                    done = True
+                    # Explosion detection (FCN-level threshold)
+                    if update_info['grad_norm'] > 25.0:
+                        print(f"\n⚠️  GRADIENT EXPLOSION DETECTED at step {episode_steps}")
+                        print(f"   Gradient norm: {update_info['grad_norm']:.2f} (threshold: 25.0)")
+                        print(f"   Q-values: mean={update_info['q_mean']:.2f}, max={update_info['q_max']:.2f}")
+                        print(f"   Stopping episode early to prevent training collapse\n")
+                        # Mark explosion and break episode
+                        done = True
 
         state = next_state  # Keep raw state for next iteration
         episode_reward += reward

@@ -195,7 +195,9 @@ class CoordinateDQNAgent:
             self.policy_net.eval()
             
             # Forward pass (FCN doesn't need agent_pos)
-            q_values = self.policy_net(state_tensor).squeeze(0).cpu().numpy()  # [num_actions]
+            q_values_raw = self.policy_net(state_tensor)  # [1, num_actions]
+            # Clamp Q-values to prevent selection from exploded outputs
+            q_values = torch.clamp(q_values_raw, min=-100.0, max=100.0).squeeze(0).cpu().numpy()  # [num_actions]
             
             # Set back to train mode
             self.policy_net.train()
@@ -312,7 +314,9 @@ class CoordinateDQNAgent:
                 
                 # Compute Bellman targets in FP32
                 targets = rewards + self.gamma * next_q_values.float() * (1 - dones)
-                #targets = torch.clamp(targets, min=-100.0, max=100.0)
+                # Clamp targets to prevent Q-value explosion (conservative bounds for 300-step episodes)
+                # Expected Q ≈ r_avg / (1-γ) = 0.5 / 0.01 = 50, allow ±2× margin = [-100, 100]
+                targets = torch.clamp(targets, min=-100.0, max=100.0)
 
             # Now compute Q-values and loss with autocast
             with torch.cuda.amp.autocast():
